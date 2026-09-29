@@ -20,7 +20,7 @@ internal static class Program
     private sealed class MainForm : Form
     {
         private readonly Label title = new() { AutoSize = true, Font = new Font("Segoe UI", 18, FontStyle.Bold), Text = "ACE-Step UI" };
-        private readonly Label status = new() { AutoSize = true, Font = new Font("Segoe UI", 10), Text = "Starting..." };
+        private readonly Label status = new() { AutoSize = false, Size = new Size(460, 118), Font = new Font("Segoe UI", 10), Text = "Starting..." };
         private readonly ProgressBar progress = new() { Style = ProgressBarStyle.Marquee, MarqueeAnimationSpeed = 25, Width = 460, Height = 18 };
         private readonly WebView2 web = new() { Dock = DockStyle.Fill, Visible = false };
         private bool ready;
@@ -34,10 +34,10 @@ internal static class Program
             StartPosition = FormStartPosition.CenterScreen;
 
             var startup = new Panel { Dock = DockStyle.Fill };
-            var startupCard = new Panel { Size = new Size(500, 190) };
+            var startupCard = new Panel { Size = new Size(500, 250) };
             title.Location = new Point(20, 12);
             status.Location = new Point(20, 68);
-            progress.Location = new Point(20, 142);
+            progress.Location = new Point(20, 202);
             startupCard.Controls.Add(title);
             startupCard.Controls.Add(status);
             startupCard.Controls.Add(progress);
@@ -100,7 +100,7 @@ internal static class Program
         if (!File.Exists(node) || !File.Exists(server) || !File.Exists(vite))
             throw new InvalidOperationException("The portable UI runtime is incomplete. Re-extract the release ZIP.");
 
-        status("✓ Portable engine found\n⟳ Loading ACE-Step models…");
+        status("✓ Portable engine found\n✓ Python runtime found\n⟳ Starting ACE-Step engine…\n⟳ Loading AI models into memory…");
         Start(python, $"{Quote(apiServer)} --host 127.0.0.1 --port 8001", engine,
             new Dictionary<string, string> { ["ACESTEP_USE_FLASH_ATTENTION"] = "false" });
 
@@ -108,12 +108,12 @@ internal static class Program
         if (!await WaitFor("http://127.0.0.1:8001/health", TimeSpan.FromMinutes(15)))
             throw new TimeoutException("ACE-Step did not become ready within 15 minutes. Model downloads or first-run initialization may still be in progress.");
 
-        status("✓ ACE-Step API ready\n⟳ Starting UI backend…");
+        status("✓ Portable engine found\n✓ AI models loaded\n✓ ACE-Step API ready\n⟳ Starting local library & UI backend…");
         Start(node, Quote(server), Path.Combine(root, "app", "server"));
         if (!await WaitFor("http://127.0.0.1:3001/health", TimeSpan.FromMinutes(2)))
             throw new InvalidOperationException("ACE-Step UI backend failed to start.");
 
-        status("✓ ACE-Step API ready\n✓ UI backend ready\n⟳ Starting desktop UI…");
+        status("✓ AI models loaded\n✓ ACE-Step API ready\n✓ Local library & backend ready\n⟳ Starting desktop interface…");
         Start(node, $"{Quote(vite)} preview --host 127.0.0.1 --port 3000", Path.Combine(root, "app"));
         if (!await WaitFor("http://127.0.0.1:3000", TimeSpan.FromMinutes(2)))
             throw new InvalidOperationException("ACE-Step UI frontend failed to start.");
