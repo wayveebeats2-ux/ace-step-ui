@@ -5,6 +5,7 @@ using Microsoft.Web.WebView2.WinForms;
 namespace AceStepUiLauncher;
 
 // Portable desktop launcher: ACE-Step API + UI backend + WebView2 frontend.
+// Build trigger: stacked portable routing and startup-progress updates.
 internal static class Program
 {
     private static readonly List<Process> Children = new();
