@@ -185,6 +185,16 @@ internal static class Program
         return false;
     }
 
+    private static readonly object LogLock = new();
+
+    private static void AppendLog(string path, string line)
+    {
+        lock (LogLock)
+        {
+            File.AppendAllText(path, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {line}{Environment.NewLine}", Encoding.UTF8);
+        }
+    }
+
     private static string Quote(string value) => $"\"{value}\"";
 
     private static void StopChildren()
