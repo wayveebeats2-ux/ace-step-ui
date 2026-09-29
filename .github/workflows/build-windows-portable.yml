@@ -1,0 +1,86 @@
+name: Build Windows Portable
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install and build UI
+        shell: pwsh
+        run: |
+          npm ci
+          npm run build
+          Push-Location server
+          npm ci
+          npm run build
+          Pop-Location
+
+      - name: Download portable Node runtime
+        shell: pwsh
+        run: |
+          $version = "22.20.0"
+          Invoke-WebRequest "https://nodejs.org/dist/v$version/node-v$version-win-x64.zip" -OutFile node.zip
+          Expand-Archive node.zip -DestinationPath node-temp
+          New-Item -ItemType Directory -Force portable/runtime/node | Out-Null
+          Copy-Item "node-temp/node-v$version-win-x64/node.exe" portable/runtime/node/node.exe
+
+      - name: Assemble portable app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force portable/app/server | Out-Null
+          Copy-Item dist portable/app/dist -Recurse
+          Copy-Item node_modules portable/app/node_modules -Recurse
+          Copy-Item package.json portable/app/package.json
+
+          Copy-Item server/dist portable/app/server/dist -Recurse
+          Copy-Item server/node_modules portable/app/server/node_modules -Recurse
+          Copy-Item server/public portable/app/server/public -Recurse
+          Copy-Item server/audio-editor portable/app/server/audio-editor -Recurse
+          Copy-Item server/.env.example portable/app/server/.env
+          New-Item -ItemType Directory -Force portable/app/server/data | Out-Null
+
+      - name: Build launcher EXE
+        shell: pwsh
+        run: |
+          dotnet publish packaging/windows/ACE-Step-UI-Launcher.csproj -c Release -o launcher
+          Copy-Item "launcher/ACE-Step UI.exe" "portable/ACE-Step UI.exe"
+
+      - name: Add engine instructions
+        shell: pwsh
+        run: |
+          @"
+          ACE-Step UI Portable
+
+          1. Download/extract the official ACE-Step 1.5 Windows portable package.
+          2. Put its ACE-Step-1.5 folder beside "ACE-Step UI.exe".
+          3. Double-click "ACE-Step UI.exe".
+
+          The launcher starts ACE-Step, the UI backend and frontend automatically.
+          No Node.js installation is required.
+          "@ | Set-Content portable/README-WINDOWS.txt
+
+      - name: Create ZIP
+        shell: pwsh
+        run: Compress-Archive portable/* ACE-Step-UI-Windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ACE-Step-UI-Windows-x64
+          path: ACE-Step-UI-Windows-x64.zip
+          retention-days: 14
