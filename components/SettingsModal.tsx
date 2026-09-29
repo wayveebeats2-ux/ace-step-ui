@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { X, User as UserIcon, Palette, Info, Edit3, ExternalLink, Globe, ChevronDown, Github } from 'lucide-react';
+import { X, User as UserIcon, Palette, Info, Edit3, ExternalLink, Globe, ChevronDown, Github, Cpu, Server, FolderOpen } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useI18n } from '../context/I18nContext';
 import { EditProfileModal } from './EditProfileModal';
@@ -175,6 +175,27 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, t
                                     size={20}
                                     className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none"
                                 />
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Desktop / ACE-Step Section */}
+                    <div className="space-y-4">
+                        <div className="flex items-center gap-2 text-zinc-900 dark:text-white">
+                            <Cpu size={20} />
+                            <h3 className="font-semibold">ACE-Step Desktop</h3>
+                        </div>
+                        <div className="pl-7 grid gap-3">
+                            <div className="flex items-center justify-between rounded-lg bg-zinc-50 dark:bg-zinc-800/50 px-4 py-3">
+                                <span className="flex items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400"><Server size={16}/> Engine API</span>
+                                <span className="text-sm font-medium text-emerald-500">127.0.0.1:8001</span>
+                            </div>
+                            <div className="flex items-center justify-between rounded-lg bg-zinc-50 dark:bg-zinc-800/50 px-4 py-3">
+                                <span className="flex items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400"><Server size={16}/> Local backend</span>
+                                <span className="text-sm font-medium text-emerald-500">127.0.0.1:3001</span>
+                            </div>
+                            <div className="flex items-center gap-2 rounded-lg bg-zinc-50 dark:bg-zinc-800/50 px-4 py-3 text-sm text-zinc-500 dark:text-zinc-400">
+                                <FolderOpen size={16}/><span>Diagnostic logs are saved in the app's <strong className="text-zinc-800 dark:text-zinc-200">logs</strong> folder.</span>
                             </div>
                         </div>
                     </div>
