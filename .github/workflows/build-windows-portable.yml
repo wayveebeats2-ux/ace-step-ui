@@ -6,6 +6,10 @@ on:
     branches: [main]
     paths:
       - 'packaging/windows/**'
+      - 'server/**'
+      - 'components/**'
+      - 'services/**'
+      - 'App.tsx'
       - '.github/workflows/build-windows-portable.yml'
 
 jobs:
