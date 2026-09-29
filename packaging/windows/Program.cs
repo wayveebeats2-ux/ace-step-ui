@@ -21,7 +21,7 @@ internal static class Program
     {
         private readonly Label title = new() { AutoSize = true, Font = new Font("Segoe UI", 18, FontStyle.Bold), Text = "ACE-Step UI" };
         private readonly Label status = new() { AutoSize = true, Font = new Font("Segoe UI", 10), Text = "Starting..." };
-        private readonly ProgressBar progress = new() { Style = ProgressBarStyle.Marquee, MarqueeAnimationSpeed = 25 };
+        private readonly ProgressBar progress = new() { Style = ProgressBarStyle.Marquee, MarqueeAnimationSpeed = 25, Width = 460, Height = 18 };
         private readonly WebView2 web = new() { Dock = DockStyle.Fill, Visible = false };
         private bool ready;
 
@@ -33,14 +33,23 @@ internal static class Program
             MinimumSize = new Size(900, 650);
             StartPosition = FormStartPosition.CenterScreen;
 
-            var startup = new Panel { Dock = DockStyle.Fill, Padding = new Padding(48) };
-            title.Location = new Point(48, 48);
-            status.Location = new Point(52, 100);
-            progress.Location = new Point(52, 140);
-            progress.Width = 420;
-            startup.Controls.Add(title);
-            startup.Controls.Add(status);
-            startup.Controls.Add(progress);
+            var startup = new Panel { Dock = DockStyle.Fill };
+            var startupCard = new Panel { Size = new Size(500, 190) };
+            title.Location = new Point(20, 12);
+            status.Location = new Point(20, 68);
+            progress.Location = new Point(20, 142);
+            startupCard.Controls.Add(title);
+            startupCard.Controls.Add(status);
+            startupCard.Controls.Add(progress);
+            startup.Controls.Add(startupCard);
+
+            void CenterStartupCard()
+            {
+                startupCard.Left = Math.Max(0, (startup.ClientSize.Width - startupCard.Width) / 2);
+                startupCard.Top = Math.Max(0, (startup.ClientSize.Height - startupCard.Height) / 2);
+            }
+            startup.Resize += (_, _) => CenterStartupCard();
+            CenterStartupCard();
             Controls.Add(web);
             Controls.Add(startup);
 
