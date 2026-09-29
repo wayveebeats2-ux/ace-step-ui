@@ -2,6 +2,11 @@ name: Build Windows Portable
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'packaging/windows/**'
+      - '.github/workflows/build-windows-portable.yml'
 
 jobs:
   build:
