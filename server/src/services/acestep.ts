@@ -482,29 +482,141 @@ async function processGeneration(
   job: ActiveJob,
 ): Promise<void> {
   job.status = 'running';
-  job.stage = 'Starting generation...';
+  job.stage = 'Submitting to ACE-Step API...';
 
-  // Guard: cover/audio2audio requires a source or audio codes
   if ((params.taskType === 'cover' || params.taskType === 'audio2audio') && !params.sourceAudioUrl && !params.audioCodes) {
     job.status = 'failed';
     job.error = `task_type='${params.taskType}' requires a source audio or audio codes`;
     return;
   }
 
-  // Try Gradio first
-  const gradioUp = await isGradioAvailable();
-  if (gradioUp) {
-    try {
-      await processGenerationViaGradio(jobId, params, job);
-      return;
-    } catch (error) {
-      console.error(`Job ${jobId}: Gradio generation failed, trying Python spawn fallback`, error);
-      // Fall through to Python spawn
-    }
+  try {
+    await processGenerationViaRestApi(jobId, params, job);
+  } catch (error) {
+    console.error(`Job ${jobId}: ACE-Step REST generation failed`, error);
+    job.status = 'failed';
+    job.error = error instanceof Error ? error.message : 'ACE-Step API generation failed';
+  }
+}
+
+async function processGenerationViaRestApi(
+  jobId: string,
+  params: GenerationParams,
+  job: ActiveJob,
+): Promise<void> {
+  const caption = params.style || 'pop music';
+  const prompt = params.customMode ? caption : (params.songDescription || caption);
+  const lyrics = params.instrumental ? '' : (params.lyrics || '');
+  const taskType = params.taskType === 'audio2audio' ? 'cover' : (params.taskType || 'text2music');
+
+  const body: Record<string, unknown> = {
+    prompt,
+    lyrics,
+    task_type: taskType,
+    thinking: params.thinking ?? false,
+    use_format: params.enhance ?? false,
+    vocal_language: params.vocalLanguage || 'en',
+    audio_format: params.audioFormat || 'mp3',
+    audio_duration: params.duration && params.duration > 0 ? params.duration : 60,
+    inference_steps: params.inferenceSteps ?? 8,
+    guidance_scale: params.guidanceScale ?? 7.0,
+    batch_size: Math.min(Math.max(params.batchSize ?? 1, 1), 2),
+    use_random_seed: params.randomSeed !== false,
+    seed: params.seed ?? -1,
+    shift: params.shift ?? 3.0,
+    infer_method: params.inferMethod || 'ode',
+    use_adg: params.useAdg ?? false,
+    cfg_interval_start: params.cfgIntervalStart ?? 0.0,
+    cfg_interval_end: params.cfgIntervalEnd ?? 1.0,
+    lm_temperature: params.lmTemperature ?? 0.85,
+    lm_cfg_scale: params.lmCfgScale ?? 2.0,
+    lm_top_k: params.lmTopK ?? 0,
+    lm_top_p: params.lmTopP ?? 0.9,
+    lm_negative_prompt: params.lmNegativePrompt || 'NO USER INPUT',
+    use_cot_caption: params.useCotCaption ?? true,
+    use_cot_language: params.useCotLanguage ?? true,
+    allow_lm_batch: params.allowLmBatch ?? true,
+    constrained_decoding_debug: params.constrainedDecodingDebug ?? false,
+  };
+  if (params.ditModel) body.model = params.ditModel;
+  if (params.bpm && params.bpm > 0) body.bpm = params.bpm;
+  if (params.keyScale) body.key_scale = params.keyScale;
+  if (params.timeSignature) body.time_signature = params.timeSignature;
+  if (params.audioCodes) body.audio_code_string = params.audioCodes;
+  if (params.referenceAudioUrl) body.reference_audio_path = resolveAudioPath(params.referenceAudioUrl);
+  if (params.sourceAudioUrl) body.src_audio_path = resolveAudioPath(params.sourceAudioUrl);
+  if (params.repaintingStart !== undefined) body.repainting_start = params.repaintingStart;
+  if (params.repaintingEnd !== undefined) body.repainting_end = params.repaintingEnd;
+  if (params.audioCoverStrength !== undefined) body.audio_cover_strength = params.audioCoverStrength;
+  if (params.instruction) body.instruction = params.instruction;
+  if (params.customTimesteps) body.timesteps = params.customTimesteps;
+
+  console.log(`Job ${jobId}: POST ${ACESTEP_API}/release_task`);
+  const submit = await fetch(`${ACESTEP_API}/release_task`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const submitText = await submit.text();
+  if (!submit.ok) throw new Error(`ACE-Step /release_task failed (${submit.status}): ${submitText}`);
+  const submitJson = JSON.parse(submitText) as any;
+  if (submitJson.code !== 200 || !submitJson.data?.task_id) {
+    throw new Error(submitJson.error || 'ACE-Step did not return a task id');
   }
 
-  // Fallback: Python spawn
-  await processGenerationViaPython(jobId, params, job);
+  const taskId = String(submitJson.data.task_id);
+  job.taskId = taskId;
+  job.stage = 'Generating audio...';
+
+  const deadline = Date.now() + 15 * 60 * 1000;
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    const query = await fetch(`${ACESTEP_API}/query_result`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id_list: [taskId] }),
+    });
+    const queryText = await query.text();
+    if (!query.ok) throw new Error(`ACE-Step /query_result failed (${query.status}): ${queryText}`);
+    const queryJson = JSON.parse(queryText) as any;
+    const task = queryJson.data?.[0];
+    if (!task) continue;
+    if (task.status === 2) throw new Error(task.error || 'ACE-Step generation failed');
+    if (task.status !== 1) continue;
+
+    const resultItems = typeof task.result === 'string' ? JSON.parse(task.result) : task.result;
+    const items = Array.isArray(resultItems) ? resultItems : [resultItems];
+    const audioUrls: string[] = [];
+    let resultDuration = params.duration && params.duration > 0 ? params.duration : 0;
+    for (const item of items) {
+      if (!item?.file) continue;
+      const ext = String(item.file).toLowerCase().includes('.flac') ? '.flac' : '.mp3';
+      const filename = `${jobId}_${audioUrls.length}${ext}`;
+      const destPath = path.join(AUDIO_DIR, filename);
+      await mkdir(AUDIO_DIR, { recursive: true });
+      const audioResponse = await fetch(new URL(String(item.file), ACESTEP_API));
+      if (!audioResponse.ok) throw new Error(`Generated audio download failed (${audioResponse.status})`);
+      await writeFile(destPath, Buffer.from(await audioResponse.arrayBuffer()));
+      audioUrls.push(`/audio/${filename}`);
+      if (item.metas?.duration) resultDuration = Number(item.metas.duration);
+    }
+    if (!audioUrls.length) throw new Error('ACE-Step completed but returned no audio files');
+
+    job.status = 'succeeded';
+    job.stage = 'Complete';
+    job.result = {
+      audioUrls,
+      duration: resultDuration,
+      bpm: params.bpm,
+      keyScale: params.keyScale,
+      timeSignature: params.timeSignature,
+      status: 'succeeded',
+    };
+    job.rawResponse = queryJson;
+    console.log(`Job ${jobId}: Completed via ACE-Step REST API with ${audioUrls.length} audio file(s)`);
+    return;
+  }
+  throw new Error('ACE-Step generation timed out after 15 minutes');
 }
 
 async function processGenerationViaGradio(
