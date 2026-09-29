@@ -7,6 +7,8 @@
     <PublishSingleFile>true</PublishSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
     <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
     <AssemblyName>ACE-Step UI</AssemblyName>
     <RootNamespace>AceStepUiLauncher</RootNamespace>
   </PropertyGroup>
