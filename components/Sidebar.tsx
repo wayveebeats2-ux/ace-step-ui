@@ -1,5 +1,5 @@
 import React from 'react';
-import { Library, Disc, Search, LogIn, LogOut, Sun, Moon, GraduationCap, Newspaper } from 'lucide-react';
+import { Library, Disc, Search, LogIn, LogOut, Sun, Moon, GraduationCap, Newspaper, Settings } from 'lucide-react';
 import { View } from '../types';
 import { useI18n } from '../context/I18nContext';
 
@@ -120,6 +120,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
         />
 
         <div className="mt-auto flex flex-col gap-2">
+          {user && (
+            <button
+              onClick={onOpenSettings}
+              className={`w-full rounded-xl flex items-center gap-3 transition-all duration-200 text-zinc-500 dark:text-zinc-400 hover:text-black dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-white/5 ${isOpen ? 'px-3 py-2.5 justify-start' : 'aspect-square justify-center'}`}
+              title={t('settings')}
+            >
+              <div className="flex-shrink-0"><Settings size={20} /></div>
+              {isOpen && <span className="text-sm font-medium whitespace-nowrap">{t('settings')}</span>}
+            </button>
+          )}
           {/* Theme Toggle */}
           <button
             onClick={onToggleTheme}
