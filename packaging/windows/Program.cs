@@ -104,7 +104,15 @@ internal static class Program
 
         status("✓ Portable engine found\n✓ Python runtime found\n⟳ Starting ACE-Step engine…\n⟳ Loading AI models into memory…");
         Start(python, $"{Quote(apiServer)} --host 127.0.0.1 --port 8001", engine,
-            new Dictionary<string, string> { ["ACESTEP_USE_FLASH_ATTENTION"] = "false" }, "ace-step.log");
+            new Dictionary<string, string>
+            {
+                ["ACESTEP_USE_FLASH_ATTENTION"] = "false",
+                // The official portable .env defaults to the 1.7B LM. On an 8 GB GPU
+                // ACE-Step tier3 supports the 0.6B LM, so make the portable launcher
+                // deterministic instead of inheriting the heavier .env choice.
+                ["ACESTEP_LM_MODEL_PATH"] = "acestep-5Hz-lm-0.6B",
+                ["ACESTEP_INIT_LLM"] = "auto"
+            }, "ace-step.log");
 
         // ACE-Step can return 404 at / while healthy; /health is preferred.
         if (!await WaitFor("http://127.0.0.1:8001/health", TimeSpan.FromMinutes(15)))
