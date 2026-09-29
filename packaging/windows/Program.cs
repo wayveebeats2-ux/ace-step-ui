@@ -138,7 +138,7 @@ internal static class Program
         return candidates.FirstOrDefault(p => File.Exists(Path.Combine(p, "python_embeded", "python.exe")));
     }
 
-    private static void Start(string file, string args, string cwd, Dictionary<string, string>? env = null)
+    private static void Start(string file, string args, string cwd, Dictionary<string, string>? env = null, string? logFile = null)
     {
         var psi = new ProcessStartInfo(file, args)
         {
@@ -147,15 +147,25 @@ internal static class Program
             CreateNoWindow = true,
             RedirectStandardOutput = logFile != null,
             RedirectStandardError = logFile != null,
-            WindowStyle = ProcessWindowStyle.Hidden,
-            RedirectStandardOutput = false,
-            RedirectStandardError = false
+            WindowStyle = ProcessWindowStyle.Hidden
         };
         if (env != null)
             foreach (var pair in env) psi.Environment[pair.Key] = pair.Value;
 
         var p = Process.Start(psi);
-        if (p != null) Children.Add(p);
+        if (p != null)
+        {
+            if (logFile != null)
+            {
+                var logPath = Path.Combine(AppContext.BaseDirectory, "logs", logFile);
+                Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
+                p.OutputDataReceived += (_, e) => { if (e.Data != null) AppendLog(logPath, e.Data); };
+                p.ErrorDataReceived += (_, e) => { if (e.Data != null) AppendLog(logPath, e.Data); };
+                p.BeginOutputReadLine();
+                p.BeginErrorReadLine();
+            }
+            Children.Add(p);
+        }
     }
 
     private static async Task<bool> WaitFor(string url, TimeSpan timeout)
