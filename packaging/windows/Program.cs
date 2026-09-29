@@ -110,7 +110,13 @@ internal static class Program
             throw new TimeoutException("ACE-Step did not become ready within 15 minutes. Model downloads or first-run initialization may still be in progress.");
 
         status("✓ Portable engine found\n✓ AI models loaded\n✓ ACE-Step API ready\n⟳ Starting local library & UI backend…");
-        Start(node, Quote(server), Path.Combine(root, "app", "server"));
+        Start(node, Quote(server), Path.Combine(root, "app", "server"),
+            new Dictionary<string, string>
+            {
+                ["ACESTEP_PATH"] = engine,
+                ["PYTHON_PATH"] = python,
+                ["ACESTEP_API_URL"] = "http://127.0.0.1:8001"
+            });
         if (!await WaitFor("http://127.0.0.1:3001/health", TimeSpan.FromMinutes(2)))
             throw new InvalidOperationException("ACE-Step UI backend failed to start.");
 
