@@ -1,5 +1,5 @@
-// Use relative URLs so Vite proxy handles them (enables LAN access)
-const API_BASE = '';
+// Portable UI backend runs on port 3001 on the same host as the frontend.
+const API_BASE = window.location.protocol + '//' + window.location.hostname + ':3001';
 
 // Resolve audio URL based on storage type
 export function getAudioUrl(audioUrl: string | undefined | null, songId?: string): string | undefined {
