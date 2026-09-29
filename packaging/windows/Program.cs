@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Net.Http;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -103,7 +104,7 @@ internal static class Program
 
         status("✓ Portable engine found\n✓ Python runtime found\n⟳ Starting ACE-Step engine…\n⟳ Loading AI models into memory…");
         Start(python, $"{Quote(apiServer)} --host 127.0.0.1 --port 8001", engine,
-            new Dictionary<string, string> { ["ACESTEP_USE_FLASH_ATTENTION"] = "false" });
+            new Dictionary<string, string> { ["ACESTEP_USE_FLASH_ATTENTION"] = "false" }, "ace-step.log");
 
         // ACE-Step can return 404 at / while healthy; /health is preferred.
         if (!await WaitFor("http://127.0.0.1:8001/health", TimeSpan.FromMinutes(15)))
@@ -116,7 +117,7 @@ internal static class Program
                 ["ACESTEP_PATH"] = engine,
                 ["PYTHON_PATH"] = python,
                 ["ACESTEP_API_URL"] = "http://127.0.0.1:8001"
-            });
+            }, "backend.log");
         if (!await WaitFor("http://127.0.0.1:3001/health", TimeSpan.FromMinutes(2)))
             throw new InvalidOperationException("ACE-Step UI backend failed to start.");
 
@@ -144,6 +145,8 @@ internal static class Program
             WorkingDirectory = cwd,
             UseShellExecute = false,
             CreateNoWindow = true,
+            RedirectStandardOutput = logFile != null,
+            RedirectStandardError = logFile != null,
             WindowStyle = ProcessWindowStyle.Hidden,
             RedirectStandardOutput = false,
             RedirectStandardError = false
