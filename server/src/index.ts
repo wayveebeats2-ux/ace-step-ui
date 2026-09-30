@@ -27,6 +27,9 @@ import loraRoutes from './routes/lora.js';
 import trainingRoutes from './routes/training.js';
 import { pool } from './db/pool.js';
 import './db/migrate.js';
+import { recoverInterruptedGenerations } from './services/generationPersistence.js';
+
+recoverInterruptedGenerations();
 
 const app = express();
 
@@ -79,7 +82,7 @@ app.use(cors({
 app.use(express.json());
 
 // Serve static audio files
-app.use('/audio', express.static(path.join(__dirname, '../public/audio')));
+app.use('/audio', express.static(config.storage.audioDir));
 
 // Audio Editor (AudioMass) - needs relaxed CSP for inline scripts and external images
 app.use('/editor', (req, res, next) => {

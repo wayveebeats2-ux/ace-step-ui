@@ -1,3 +1,5 @@
+> **Windows portable fork:** Extract the UI package, place the official `ACE-Step-1.5` folder beside `ACE-Step UI.exe`, and double-click the EXE. See [Windows generation audit and RTX 3050 regression instructions](docs/windows-generation.md) for the REST architecture, low-VRAM profile, requirements, and current limitations.
+
 <p align="center">
   <img src="https://img.shields.io/badge/🎵-ACE--Step_UI-ff69b4?style=for-the-badge&labelColor=1a1a1a" alt="ACE-Step UI" height="60">
 </p>

@@ -9,6 +9,9 @@ import { existsSync, readdirSync, statSync, readFileSync } from 'fs';
 import { mkdir, writeFile, readFile } from 'fs/promises';
 import { execSync, spawn } from 'child_process';
 import { randomUUID } from 'crypto';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const router = Router();
 
@@ -337,6 +340,8 @@ router.post('/preprocess', authMiddleware, async (req: AuthenticatedRequest, res
     child.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
 
     child.on('close', (code: number | null) => {
+      // A spawn error also emits close; send only the original error response.
+      if (res.headersSent) return;
       if (code === 0) {
         // Try to parse JSON output
         try {

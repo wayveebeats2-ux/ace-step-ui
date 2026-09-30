@@ -13,38 +13,14 @@ import {
   getAudioStream,
   discoverEndpoints,
   checkSpaceHealth,
-  cleanupJob,
   getJobRawResponse,
-  downloadAudioToBuffer,
   resolvePythonPath,
 } from '../services/acestep.js';
+import { persistGenerationOutcome } from '../services/generationPersistence.js';
+import { buildReleaseTaskPayload } from '../services/acestep-rest.js';
 import { getStorageProvider } from '../services/storage/factory.js';
 
 const router = Router();
-
-// Auto-generate a song title from lyrics or style when none is provided
-function autoTitle(params: { title?: string; lyrics?: string; instrumental?: boolean; style?: string; songDescription?: string }): string {
-  if (params.title?.trim()) return params.title.trim();
-
-  // Try first meaningful lyric line (skip section markers like [verse], [chorus])
-  if (!params.instrumental && params.lyrics) {
-    for (const line of params.lyrics.split('\n')) {
-      const t = line.trim();
-      if (t && !/^\[.*\]$/.test(t)) {
-        return t.length > 40 ? t.slice(0, 40).trimEnd() + '…' : t;
-      }
-    }
-  }
-
-  // Fall back to first 4 words of style or description
-  const source = params.style || params.songDescription || '';
-  if (source) {
-    const words = source.trim().split(/\s+/).slice(0, 4).join(' ');
-    return words.charAt(0).toUpperCase() + words.slice(1);
-  }
-
-  return 'Untitled';
-}
 
 const audioUpload = multer({
   storage: multer.memoryStorage(),
@@ -108,6 +84,7 @@ interface GenerateBody {
   randomSeed?: boolean;
   seed?: number;
   thinking?: boolean;
+  enhance?: boolean;
   audioFormat?: 'mp3' | 'flac';
   inferMethod?: 'ode' | 'sde';
   shift?: number;
@@ -227,6 +204,7 @@ router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response
       randomSeed,
       seed,
       thinking,
+      enhance,
       audioFormat,
       inferMethod,
       shift,
@@ -295,6 +273,7 @@ router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response
       randomSeed,
       seed,
       thinking,
+      enhance,
       audioFormat,
       inferMethod,
       shift,
@@ -335,6 +314,12 @@ router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response
       ditModel,
     };
 
+    try { buildReleaseTaskPayload(params); }
+    catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+      return;
+    }
+
     // Create job record in database
     const localJobId = generateUUID();
     await pool.query(
@@ -344,11 +329,12 @@ router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response
     );
 
     // Start generation
-    const { jobId: hfJobId } = await generateMusicViaAPI(params);
+    const { jobId: hfJobId } = await generateMusicViaAPI(params,
+      outcome => persistGenerationOutcome(localJobId, req.user!.id, params, outcome));
 
     // Update job with ACE-Step task ID
     await pool.query(
-      `UPDATE generation_jobs SET acestep_task_id = ?, status = 'running', updated_at = datetime('now') WHERE id = ?`,
+      `UPDATE generation_jobs SET acestep_task_id = ?, updated_at = datetime('now') WHERE id = ?`,
       [hfJobId, localJobId]
     );
 
@@ -384,124 +370,14 @@ router.get('/status/:jobId', authMiddleware, async (req: AuthenticatedRequest, r
       return;
     }
 
-    // If job is still running, check ACE-Step status
     if (['pending', 'queued', 'running'].includes(job.status) && job.acestep_task_id) {
-      try {
-        const aceStatus = await getJobStatus(job.acestep_task_id);
-
-        if (aceStatus.status !== job.status) {
-          // Use optimistic lock: only update if status hasn't changed (prevents duplicate song creation)
-          let updateQuery = `UPDATE generation_jobs SET status = ?, updated_at = datetime('now')`;
-          const updateParams: unknown[] = [aceStatus.status];
-
-          if (aceStatus.status === 'succeeded' && aceStatus.result) {
-            updateQuery += `, result = ?`;
-            updateParams.push(JSON.stringify(aceStatus.result));
-          } else if (aceStatus.status === 'failed' && aceStatus.error) {
-            updateQuery += `, error = ?`;
-            updateParams.push(aceStatus.error);
-          }
-
-          updateQuery += ` WHERE id = ? AND status = ?`;
-          updateParams.push(req.params.jobId, job.status);
-
-          const updateResult = await pool.query(updateQuery, updateParams);
-          const wasUpdated = updateResult.rowCount > 0;
-
-          // If succeeded AND we were the first to update (optimistic lock), create song records
-          if (aceStatus.status === 'succeeded' && aceStatus.result && wasUpdated) {
-            const params = typeof job.params === 'string' ? JSON.parse(job.params) : job.params;
-            const audioUrls = aceStatus.result.audioUrls.filter((url: string) => {
-              const lower = url.toLowerCase();
-              return lower.endsWith('.mp3') || lower.endsWith('.flac') || lower.endsWith('.wav');
-            });
-            const localPaths: string[] = [];
-            const storage = getStorageProvider();
-
-            for (let i = 0; i < audioUrls.length; i++) {
-              const audioUrl = audioUrls[i];
-              const variationSuffix = audioUrls.length > 1 ? ` (v${i + 1})` : '';
-              const songTitle = autoTitle(params) + variationSuffix;
-
-              const songId = generateUUID();
-
-              try {
-                const { buffer } = await downloadAudioToBuffer(audioUrl);
-                const ext = audioUrl.includes('.flac') ? '.flac' : '.mp3';
-                const storageKey = `${req.user!.id}/${songId}${ext}`;
-                await storage.upload(storageKey, buffer, `audio/${ext.slice(1)}`);
-                const storedPath = storage.getPublicUrl(storageKey);
-
-                await pool.query(
-                  `INSERT INTO songs (id, user_id, title, lyrics, style, caption, audio_url,
-                                      duration, bpm, key_scale, time_signature, tags, is_public, generation_params,
-                                      created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now'), datetime('now'))`,
-                  [
-                    songId,
-                    req.user!.id,
-                    songTitle,
-                    params.instrumental ? '[Instrumental]' : params.lyrics,
-                    params.style,
-                    params.style,
-                    storedPath,
-                    aceStatus.result.duration && aceStatus.result.duration > 0 ? aceStatus.result.duration : (params.duration && params.duration > 0 ? params.duration : 0),
-                    aceStatus.result.bpm || params.bpm,
-                    aceStatus.result.keyScale || params.keyScale,
-                    aceStatus.result.timeSignature || params.timeSignature,
-                    JSON.stringify([]),
-                    JSON.stringify(params),
-                  ]
-                );
-
-                localPaths.push(storedPath);
-              } catch (downloadError) {
-                console.error(`Failed to download audio ${i + 1}:`, downloadError);
-                // Still create song record with remote URL
-                await pool.query(
-                  `INSERT INTO songs (id, user_id, title, lyrics, style, caption, audio_url,
-                                      duration, bpm, key_scale, time_signature, tags, is_public, generation_params,
-                                      created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now'), datetime('now'))`,
-                  [
-                    songId,
-                    req.user!.id,
-                    songTitle,
-                    params.instrumental ? '[Instrumental]' : params.lyrics,
-                    params.style,
-                    params.style,
-                    audioUrl,
-                    aceStatus.result.duration && aceStatus.result.duration > 0 ? aceStatus.result.duration : (params.duration && params.duration > 0 ? params.duration : 0),
-                    aceStatus.result.bpm || params.bpm,
-                    aceStatus.result.keyScale || params.keyScale,
-                    aceStatus.result.timeSignature || params.timeSignature,
-                    JSON.stringify([]),
-                    JSON.stringify(params),
-                  ]
-                );
-                localPaths.push(audioUrl);
-              }
-            }
-
-            aceStatus.result.audioUrls = localPaths;
-            cleanupJob(job.acestep_task_id);
-          }
-        }
-
-        res.json({
-          jobId: req.params.jobId,
-          status: aceStatus.status,
-          queuePosition: aceStatus.queuePosition,
-          etaSeconds: aceStatus.etaSeconds,
-          progress: aceStatus.progress,
-          stage: aceStatus.stage,
-          result: aceStatus.result,
-          error: aceStatus.error,
-        });
-        return;
-      } catch (aceError) {
-        console.error('ACE-Step status check error:', aceError);
+      const status = await getJobStatus(job.acestep_task_id);
+      if (status.status === 'failed') {
+        const params = typeof job.params === 'string' ? JSON.parse(job.params) : job.params;
+        await persistGenerationOutcome(job.id, job.user_id, params, status);
       }
+      res.json({ jobId: job.id, ...status });
+      return;
     }
 
     // Return stored status
@@ -824,84 +700,11 @@ router.post('/format', authMiddleware, async (req: AuthenticatedRequest, res: Re
       });
       return;
     } catch (fetchErr: any) {
-      // Only fall back to Python spawn on network errors (service not yet reachable)
-      if (fetchErr?.name !== 'AbortError' && (fetchErr?.code === 'ECONNREFUSED' || fetchErr?.cause?.code === 'ECONNREFUSED')) {
-        console.warn('[Format] REST API unreachable, falling back to Python spawn');
-      } else {
-        console.error('[Format] REST API request failed:', fetchErr?.message);
-        res.status(500).json({ success: false, error: fetchErr?.message || 'Format request failed' });
-        return;
-      }
+      console.error('[Format] REST API request failed:', fetchErr?.message);
+      res.status(502).json({ success: false, error: fetchErr?.message || 'ACE-Step format request failed' });
+      return;
     }
 
-    // Fallback: Python spawn (only reached when REST API is unreachable)
-    const { spawn } = await import('child_process');
-    const ACESTEP_DIR = process.env.ACESTEP_PATH || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../ACE-Step-1.5');
-    const __filename = fileURLToPath(import.meta.url);
-    const __dirname = path.dirname(__filename);
-    const SCRIPTS_DIR = path.join(__dirname, '../../scripts');
-    const FORMAT_SCRIPT = path.join(SCRIPTS_DIR, 'format_sample.py');
-    const pythonPath = resolvePythonPath(ACESTEP_DIR);
-
-    const args = [FORMAT_SCRIPT, '--caption', caption, '--json'];
-    if (lyrics) args.push('--lyrics', lyrics);
-    if (bpm && bpm > 0) args.push('--bpm', String(bpm));
-    if (duration && duration > 0) args.push('--duration', String(duration));
-    if (keyScale) args.push('--key-scale', keyScale);
-    if (timeSignature) args.push('--time-signature', timeSignature);
-    if (temperature !== undefined) args.push('--temperature', String(temperature));
-    if (topK && topK > 0) args.push('--top-k', String(topK));
-    if (topP !== undefined) args.push('--top-p', String(topP));
-    if (lmModel) args.push('--lm-model', lmModel);
-    if (lmBackend) args.push('--lm-backend', lmBackend);
-
-    console.log(`[Format] Fallback spawn: ${pythonPath} ${args.join(' ')}`);
-    const result = await new Promise<{ success: boolean; data?: any; error?: string }>((resolve) => {
-      const proc = spawn(pythonPath, args, {
-        cwd: ACESTEP_DIR,
-        env: { ...process.env, ACESTEP_PATH: ACESTEP_DIR },
-      });
-
-      let stdout = '';
-      let stderr = '';
-
-      proc.stdout.on('data', (data) => { stdout += data.toString(); });
-      proc.stderr.on('data', (data) => { stderr += data.toString(); });
-
-      proc.on('close', (code) => {
-        if (code === 0 && stdout) {
-          const lines = stdout.trim().split('\n');
-          let jsonStr = '';
-          for (let i = lines.length - 1; i >= 0; i--) {
-            if (lines[i].startsWith('{')) { jsonStr = lines[i]; break; }
-          }
-          try {
-            const parsed = JSON.parse(jsonStr || stdout);
-            resolve({ success: true, data: parsed });
-          } catch {
-            console.error('[Format] Failed to parse stdout:', stdout.slice(0, 500));
-            resolve({ success: false, error: 'Failed to parse format result' });
-          }
-        } else {
-          console.error(`[Format] Process exited with code ${code}`);
-          if (stdout) console.error('[Format] stdout:', stdout.slice(0, 1000));
-          if (stderr) console.error('[Format] stderr:', stderr.slice(0, 1000));
-          resolve({ success: false, error: stderr || stdout || `Format process exited with code ${code}` });
-        }
-      });
-
-      proc.on('error', (err) => {
-        console.error('[Format] Spawn error:', err.message);
-        resolve({ success: false, error: err.message });
-      });
-    });
-
-    if (result.success && result.data) {
-      res.json(result.data);
-    } else {
-      console.error('[Format] Python error:', result.error);
-      res.status(500).json({ success: false, error: result.error });
-    }
   } catch (error) {
     console.error('[Format] Route error:', error);
     res.status(500).json({ error: (error as Error).message });

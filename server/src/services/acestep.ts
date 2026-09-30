@@ -1,1107 +1,253 @@
-import { writeFile, mkdir, copyFile, rm, readFile } from 'fs/promises';
-import { spawn, execSync } from 'child_process';
-import { existsSync } from 'fs';
-import path from 'path';
-import { handle_file } from '@gradio/client';
-
-// Get audio duration using ffprobe
-function getAudioDuration(filePath: string): number {
-  try {
-    const result = execSync(
-      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}"`,
-      { encoding: 'utf-8', timeout: 10000 }
-    );
-    const duration = parseFloat(result.trim());
-    return isNaN(duration) ? 0 : Math.round(duration);
-  } catch (error) {
-    console.warn('Failed to get audio duration:', error);
-    return 0;
-  }
-}
-import { fileURLToPath } from 'url';
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { config } from '../config/index.js';
-import { getGradioClient, resetGradioClient, isGradioAvailable } from './gradio-client.js';
+import type { GenerationParams, GenerationResult, JobStatus } from './acestep-types.js';
+import {
+  audioExtension, buildReleaseTaskPayload, DEFAULT_DIT_MODEL, DESKTOP_LM_MODEL,
+  engineAudioUrl, GENERATION_TIMEOUT_MS, parseTaskResult, requestEngineJson,
+} from './acestep-rest.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const AUDIO_DIR = path.join(__dirname, '../../public/audio');
+export type { GenerationParams, GenerationResult, JobStatus } from './acestep-types.js';
+export { resolvePythonPath } from './python-runtime.js';
 
-const ACESTEP_API = config.acestep.apiUrl;
-
-// Resolve ACE-Step path (from env or default relative path)
-function resolveAceStepPath(): string {
-  const envPath = process.env.ACESTEP_PATH;
-  if (envPath) {
-    return path.isAbsolute(envPath) ? envPath : path.resolve(process.cwd(), envPath);
-  }
-  // Default: sibling directory (server/src/services -> ../../../ACE-Step-1.5 = app/ACE-Step-1.5)
-  return path.resolve(__dirname, '../../../ACE-Step-1.5');
-}
-
-// Resolve Python path cross-platform (supports venv and portable installations)
-export function resolvePythonPath(baseDir: string): string {
-  // Allow explicit override via env var
-  if (process.env.PYTHON_PATH) {
-    return process.env.PYTHON_PATH;
-  }
-
-  const isWindows = process.platform === 'win32';
-  const pythonExe = isWindows ? 'python.exe' : 'python';
-
-  // Check for portable installation first (python_embeded)
-  const portablePath = path.join(baseDir, 'python_embeded', pythonExe);
-  if (existsSync(portablePath)) {
-    return portablePath;
-  }
-
-  // Check common venv directory names (Pinokio uses 'env', others use '.venv' or 'venv')
-  const venvDirs = ['env', '.venv', 'venv'];
-  for (const venvDir of venvDirs) {
-    const venvPython = isWindows
-      ? path.join(baseDir, venvDir, 'Scripts', pythonExe)
-      : path.join(baseDir, venvDir, 'bin', 'python');
-    if (existsSync(venvPython)) {
-      return venvPython;
-    }
-  }
-
-  // Fallback to first option (will produce a clear error if not found)
-  if (isWindows) {
-    return path.join(baseDir, 'env', 'Scripts', pythonExe);
-  }
-  return path.join(baseDir, 'env', 'bin', 'python');
-}
-
-const ACESTEP_DIR = resolveAceStepPath();
-const SCRIPTS_DIR = path.join(__dirname, '../../scripts');
-const PYTHON_SCRIPT = path.join(SCRIPTS_DIR, 'simple_generate.py');
-
-// ---------------------------------------------------------------------------
-// Gradio generation: map params to the 51 positional args for /generation_wrapper
-// ---------------------------------------------------------------------------
-
-/**
- * Resolve an audio URL (e.g. /audio/file.mp3) to an absolute local file path.
- */
-function resolveAudioPath(audioUrl: string): string {
-  if (audioUrl.startsWith('/audio/')) {
-    return path.join(AUDIO_DIR, audioUrl.replace('/audio/', ''));
-  }
-  if (audioUrl.startsWith('http')) {
-    try {
-      const parsed = new URL(audioUrl);
-      if (parsed.pathname.startsWith('/audio/')) {
-        return path.join(AUDIO_DIR, parsed.pathname.replace('/audio/', ''));
-      }
-    } catch { /* fall through */ }
-  }
-  return audioUrl;
-}
-
-/**
- * Prepare a local audio file for Gradio upload.
- * Returns a handle_file() wrapper or null if no file.
- */
-async function prepareAudioFile(audioUrl: string | undefined): Promise<unknown> {
-  if (!audioUrl) return null;
-
-  const filePath = resolveAudioPath(audioUrl);
-
-  try {
-    const buffer = await readFile(filePath);
-    const ext = path.extname(filePath).toLowerCase();
-    const mimeMap: Record<string, string> = {
-      '.flac': 'audio/flac', '.wav': 'audio/wav', '.ogg': 'audio/ogg',
-      '.opus': 'audio/opus', '.m4a': 'audio/mp4', '.mp4': 'audio/mp4',
-    };
-    const mimeType = mimeMap[ext] || 'audio/mpeg';
-    const blob = new Blob([buffer], { type: mimeType });
-    return handle_file(blob);
-  } catch (error) {
-    console.warn(`[Gradio] Failed to read audio file ${filePath}:`, error);
-    // Fall back to URL-based reference if file can't be read locally
-    if (audioUrl.startsWith('http')) {
-      return handle_file(audioUrl);
-    }
-    return null;
-  }
-}
-
-/**
- * Build the 50 positional arguments for the Gradio /generation_wrapper endpoint.
- */
-async function buildGradioArgs(params: GenerationParams): Promise<unknown[]> {
-  const caption = params.style || 'pop music';
-  const prompt = params.customMode ? caption : (params.songDescription || caption);
-  const lyrics = params.instrumental ? '' : (params.lyrics || '');
-  const isThinking = params.thinking ?? false;
-  const isEnhance = params.enhance ?? false;
-
-  // Prepare audio files (async — reads from disk)
-  const referenceAudio = await prepareAudioFile(params.referenceAudioUrl);
-  const sourceAudio = await prepareAudioFile(params.sourceAudioUrl);
-
-  // Guard: cover/repaint modes require source audio to be loadable
-  const needsSource = params.taskType === 'cover' || params.taskType === 'audio2audio' || params.taskType === 'repaint';
-  if (needsSource && params.sourceAudioUrl && sourceAudio === null) {
-    throw new Error(`Source audio file could not be loaded from: ${params.sourceAudioUrl}. Make sure the file was uploaded successfully.`);
-  }
-
-  // CoT features are gated by enhance OR thinking (either enables LLM enrichment)
-  const useCot = isEnhance || isThinking;
-
-  return [
-    prompt,                                                       //  0: Music Caption
-    lyrics,                                                       //  1: Lyrics
-    params.bpm && params.bpm > 0 ? params.bpm : 0,               //  2: BPM (0 = auto)
-    params.keyScale || '',                                        //  3: KeyScale
-    params.timeSignature || '',                                   //  4: Time Signature
-    params.vocalLanguage || 'en',                                 //  5: Vocal Language
-    params.inferenceSteps ?? 8,                                   //  6: DiT Inference Steps
-    params.guidanceScale ?? 7.0,                                  //  7: DiT Guidance Scale
-    params.randomSeed !== false,                                  //  8: Random Seed
-    String(params.seed ?? -1),                                    //  9: Seed
-    referenceAudio,                                               // 10: Reference Audio (filepath | null)
-    params.duration && params.duration > 0 ? params.duration : -1, // 11: Audio Duration (-1 = auto)
-    Math.min(Math.max(params.batchSize ?? 1, 1), 16),            // 12: Batch Size (clamped 1-16)
-    sourceAudio,                                                  // 13: Source Audio (filepath | null)
-    params.audioCodes || '',                                      // 14: LM Codes Hints
-    params.repaintingStart ?? 0.0,                                // 15: Repainting Start
-    params.repaintingEnd ?? -1,                                   // 16: Repainting End
-    params.instruction || 'Fill the audio semantic mask with the style described in the text prompt.', // 17: Instruction
-    params.audioCoverStrength ?? 1.0,                             // 18: Audio Cover Strength
-    0.0,                                                          // 19: Cover Noise Strength (ACE-Step v1.5 new param, default 0.0)
-    (params.taskType === 'audio2audio' ? 'cover' : params.taskType) || 'text2music', // 20: Task Type
-    params.useAdg ?? false,                                       // 21: Use ADG
-    params.cfgIntervalStart ?? 0.0,                               // 22: CFG Interval Start
-    params.cfgIntervalEnd ?? 1.0,                                 // 23: CFG Interval End
-    params.shift ?? 3.0,                                          // 24: Shift
-    params.inferMethod || 'ode',                                  // 25: Inference Method
-    params.customTimesteps || '',                                 // 26: Custom Timesteps
-    params.audioFormat || 'mp3',                                  // 27: Audio Format
-    params.lmTemperature ?? 0.85,                                 // 28: LM Temperature
-    isThinking,                                                   // 29: Think
-    params.lmCfgScale ?? 2.0,                                    // 30: LM CFG Scale
-    params.lmTopK ?? 0,                                           // 31: LM Top-K
-    params.lmTopP ?? 0.9,                                         // 32: LM Top-P
-    params.lmNegativePrompt || 'NO USER INPUT',                   // 33: LM Negative Prompt
-    useCot ? (params.useCotMetas ?? true) : false,                // 34: CoT Metas
-    useCot ? (params.useCotCaption ?? true) : false,              // 35: CaptionRewrite
-    useCot ? (params.useCotLanguage ?? true) : false,             // 36: CoT Language
-    params.isFormatCaption ?? false,                              // 37: Is Format Caption State
-    params.constrainedDecodingDebug ?? false,                     // 38: Constrained Decoding Debug
-    params.allowLmBatch ?? true,                                  // 39: ParallelThinking
-    params.getScores ?? false,                                    // 40: Auto Score
-    params.getLrc ?? false,                                       // 41: Auto LRC (timestamped lyrics)
-    params.scoreScale ?? 0.5,                                     // 42: Quality Score Sensitivity (0.01-1.0)
-    params.lmBatchChunkSize ?? 8,                                 // 43: LM Batch Chunk Size
-    params.trackName || null,                                     // 44: Track Name
-    params.completeTrackClasses || [],                            // 45: Track Names
-    true,                                                         // 46: Enable Normalization (ACE-Step v1.5, default true)
-    -1.0,                                                         // 47: Normalization DB (ACE-Step v1.5, default -1.0)
-    0.0,                                                          // 48: Latent Shift (ACE-Step v1.5, default 0.0)
-    1.0,                                                          // 49: Latent Rescale (ACE-Step v1.5, default 1.0)
-    params.autogen ?? false,                                      // 50: AutoGen
-    // Note: current_batch_index, total_batches, batch_queue, generation_params_state
-    // are hidden Gradio state variables and must NOT be passed via client.predict()
-  ];
-}
-
-/**
- * Download a Gradio audio result file to local storage.
- * Gradio returns file objects with { url, path, orig_name, ... }.
- * We copy from the server-local path (same machine) or download via URL.
- */
-async function downloadGradioAudioFile(
-  fileObj: { url?: string; path?: string; orig_name?: string },
-  destPath: string,
-): Promise<void> {
-  await mkdir(path.dirname(destPath), { recursive: true });
-
-  // Prefer direct filesystem copy (both servers on same machine)
-  if (fileObj.path && existsSync(fileObj.path)) {
-    await copyFile(fileObj.path, destPath);
-    return;
-  }
-
-  // Fall back to HTTP download via Gradio URL (use temp file for atomicity)
-  if (fileObj.url) {
-    const response = await fetch(fileObj.url);
-    if (!response.ok) {
-      throw new Error(`Failed to download Gradio audio: ${response.status}`);
-    }
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length === 0) {
-      throw new Error('Downloaded audio file is empty');
-    }
-    const tmpPath = destPath + '.tmp';
-    await writeFile(tmpPath, buffer);
-    const { rename } = await import('fs/promises');
-    await rename(tmpPath, destPath);
-    return;
-  }
-
-  throw new Error('Gradio file object has neither path nor url');
-}
-
-// ---------------------------------------------------------------------------
-// Generation types & interfaces (unchanged public API)
-// ---------------------------------------------------------------------------
-
-export interface GenerationParams {
-  // Mode
-  customMode: boolean;
-
-  // Simple Mode
-  songDescription?: string;
-
-  // Custom Mode
-  lyrics: string;
-  style: string;
-  title: string;
-
-  // Common
-  instrumental: boolean;
-  vocalLanguage?: string;
-
-  // Music Parameters
-  duration?: number;
-  bpm?: number;
-  keyScale?: string;
-  timeSignature?: string;
-
-  // Generation Settings
-  inferenceSteps?: number;
-  guidanceScale?: number;
-  batchSize?: number;
-  randomSeed?: boolean;
-  seed?: number;
-  thinking?: boolean;
-  enhance?: boolean;
-  audioFormat?: 'mp3' | 'flac';
-  inferMethod?: 'ode' | 'sde';
-  shift?: number;
-
-  // LM Parameters
-  lmTemperature?: number;
-  lmCfgScale?: number;
-  lmTopK?: number;
-  lmTopP?: number;
-  lmNegativePrompt?: string;
-  lmBackend?: 'pt' | 'vllm';
-  lmModel?: string;
-
-  // Expert Parameters
-  referenceAudioUrl?: string;
-  sourceAudioUrl?: string;
-  referenceAudioTitle?: string;
-  sourceAudioTitle?: string;
-  audioCodes?: string;
-  repaintingStart?: number;
-  repaintingEnd?: number;
-  instruction?: string;
-  audioCoverStrength?: number;
-  taskType?: string;
-  useAdg?: boolean;
-  cfgIntervalStart?: number;
-  cfgIntervalEnd?: number;
-  customTimesteps?: string;
-  useCotMetas?: boolean;
-  useCotCaption?: boolean;
-  useCotLanguage?: boolean;
-  autogen?: boolean;
-  constrainedDecodingDebug?: boolean;
-  allowLmBatch?: boolean;
-  getScores?: boolean;
-  getLrc?: boolean;
-  scoreScale?: number;
-  lmBatchChunkSize?: number;
-  trackName?: string;
-  completeTrackClasses?: string[];
-  isFormatCaption?: boolean;
-
-  // Model selection
-  ditModel?: string;
-}
-
-interface GenerationResult {
-  audioUrls: string[];
-  duration: number;
-  bpm?: number;
-  keyScale?: string;
-  timeSignature?: string;
-  status: string;
-}
-
-interface JobStatus {
-  status: 'queued' | 'running' | 'succeeded' | 'failed';
-  queuePosition?: number;
-  etaSeconds?: number;
-  progress?: number;
-  stage?: string;
-  result?: GenerationResult;
-  error?: string;
-}
-
-interface ActiveJob {
+interface ActiveJob extends JobStatus {
   params: GenerationParams;
   startTime: number;
-  status: 'queued' | 'running' | 'succeeded' | 'failed';
-  taskId?: string;
-  result?: GenerationResult;
-  error?: string;
-  processPromise?: Promise<void>;
+  finishedAt?: number;
   rawResponse?: unknown;
-  queuePosition?: number;
-  progress?: number;
-  stage?: string;
+  onFinished?: (status: JobStatus) => Promise<void>;
 }
 
 const activeJobs = new Map<string, ActiveJob>();
-
-// Periodic cleanup of old jobs (every 10 minutes, remove jobs older than 1 hour)
-setInterval(() => cleanupOldJobs(3600000), 600000);
-
-// Job queue for sequential processing (GPU can only handle one job at a time)
 const jobQueue: string[] = [];
 let isProcessingQueue = false;
+const audioDir = config.storage.audioDir;
+const cleanupTimer = setInterval(() => cleanupOldJobs(), 600_000);
+cleanupTimer.unref();
 
-// Health check - verify Gradio app is reachable
 export async function checkSpaceHealth(): Promise<boolean> {
-  return isGradioAvailable();
-}
-
-// ---------------------------------------------------------------------------
-// Model switching — call /v1/init to change the active DiT model
-// ---------------------------------------------------------------------------
-
-async function getActiveModel(): Promise<string | null> {
   try {
-    const res = await fetch(`${ACESTEP_API}/v1/models`);
-    if (!res.ok) return null;
-    const data = await res.json() as any;
-    const models = data?.data?.models || data?.models || [];
-    return models[0]?.name || null;
+    const response = await requestEngineJson('/health', undefined, 5_000);
+    const health = response.data ?? response;
+    return health.status === 'ok' && health.models_initialized !== false;
   } catch {
-    return null;
+    return false;
   }
 }
 
-async function switchModelIfNeeded(ditModel: string): Promise<void> {
-  const activeModel = await getActiveModel();
-  if (activeModel === ditModel) return; // already loaded, no-op
-
-  console.log(`[Model] Switching from '${activeModel ?? 'unknown'}' to '${ditModel}'`);
-  const res = await fetch(`${ACESTEP_API}/v1/init`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: ditModel, init_llm: false }),
-  });
-
-  if (!res.ok) {
-    const err = await res.text().catch(() => '');
-    throw new Error(`Model switch to '${ditModel}' failed: ${res.status} ${err}`);
-  }
-  console.log(`[Model] Switched to '${ditModel}'`);
-}
-
-// Discover endpoints (for compatibility)
 export async function discoverEndpoints(): Promise<unknown> {
-  return { provider: 'acestep-gradio', endpoint: ACESTEP_API };
+  return {
+    provider: 'acestep-rest', endpoint: config.acestep.apiUrl,
+    health: '/health', submit: '/release_task', query: '/query_result', audio: '/v1/audio',
+    lmBackend: 'pt', lmModel: DESKTOP_LM_MODEL,
+  };
 }
 
-// Reset client — forces Gradio reconnection on next request
-export function resetClient(): void {
-  resetGradioClient();
+async function ensureModelLoaded(model: string): Promise<void> {
+  const response = await requestEngineJson('/v1/models');
+  const inventory = response.data ?? response;
+  const current = inventory.default_model || inventory.models?.find((item: any) => item.is_default)?.name;
+  if (current === model) return;
+  // Switch the primary slot, rather than preloading multiple DiTs on an 8 GB GPU.
+  console.log(`[Model] Switching primary DiT ${current || 'unknown'} -> ${model}`);
+  await requestEngineJson('/v1/init', { model, init_llm: false }, 15 * 60_000);
 }
 
-// ---------------------------------------------------------------------------
-// Job queue
-// ---------------------------------------------------------------------------
+async function localAudioPath(audioUrl: string): Promise<string> {
+  // Reference files supplied by the UI live in our local audio library.
+  const pathname = audioUrl.startsWith('/audio/') ? audioUrl : new URL(audioUrl).pathname;
+  if (!pathname.startsWith('/audio/')) throw new Error('Source/reference audio must be uploaded to the local library');
+  const root = await realpath(audioDir);
+  const file = await realpath(path.resolve(root, decodeURIComponent(pathname.slice('/audio/'.length))));
+  const relative = path.relative(root, file);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('Audio path is outside the local library');
+  return file;
+}
+
+async function stageAudio(params: GenerationParams, body: Record<string, unknown>): Promise<string | undefined> {
+  if (!params.referenceAudioUrl && !params.sourceAudioUrl) return;
+  // Current ACE-Step permits absolute input paths only under the OS temp directory.
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'ace-step-ui-'));
+  try {
+    for (const [url, field, name] of [
+      [params.referenceAudioUrl, 'reference_audio_path', 'reference'],
+      [params.sourceAudioUrl, 'src_audio_path', 'source'],
+    ]) {
+      if (!url) continue;
+      const source = await localAudioPath(url);
+      const destination = path.join(directory, `${name}${path.extname(source)}`);
+      await copyFile(source, destination);
+      body[field!] = destination;
+    }
+    return directory;
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  const number = Number(value);
+  return value !== null && value !== '' && Number.isFinite(number) && number > 0 ? number : undefined;
+}
+
+async function runRestGeneration(jobId: string, job: ActiveJob): Promise<GenerationResult> {
+  const payload = buildReleaseTaskPayload(job.params);
+  let stagedDirectory: string | undefined;
+  const downloadedPaths: string[] = [];
+  try {
+    await ensureModelLoaded(String(payload.model || DEFAULT_DIT_MODEL));
+    stagedDirectory = await stageAudio(job.params, payload);
+    console.log(`[Generation ${jobId}] Submit ${JSON.stringify({
+      model: payload.model, lm_backend: payload.lm_backend, lm_model_path: payload.lm_model_path,
+      audio_duration: payload.audio_duration ?? 'auto', batch_size: payload.batch_size,
+      inference_steps: payload.inference_steps, thinking: payload.thinking, use_format: payload.use_format,
+      allow_lm_batch: payload.allow_lm_batch,
+    })}`);
+    const submit = await requestEngineJson('/release_task', payload);
+    const taskId = submit.data?.task_id;
+    if (!taskId) throw new Error('ACE-Step did not return a task id');
+    job.stage = 'Generating audio...';
+    console.log(`[Generation ${jobId}] ACE-Step task ${taskId}`);
+    const deadline = Date.now() + GENERATION_TIMEOUT_MS;
+    let lastStage = '';
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 1_500));
+      const query = await requestEngineJson('/query_result', { task_id_list: [String(taskId)] }, Math.min(30_000, Math.max(1, deadline - Date.now())));
+      job.rawResponse = query;
+      const task = query.data?.find((item: any) => String(item.task_id) === String(taskId)) ?? query.data?.[0];
+      if (!task) throw new Error('ACE-Step query_result returned no task');
+      const items = parseTaskResult(task);
+      job.stage = task.progress_text || items[0]?.stage || job.stage;
+      const progress = Number(items[0]?.progress);
+      if (Number.isFinite(progress)) job.progress = progress;
+      if (job.stage && job.stage !== lastStage) {
+        console.log(`[Generation ${jobId}] ${job.stage}`);
+        lastStage = job.stage;
+      }
+      if (Number(task.status) !== 1) continue;
+      job.stage = 'Saving audio to library...';
+      const audioUrls: string[] = [];
+      let metadata: any = {};
+      for (const item of items) {
+        if (!item?.file) continue;
+        const url = engineAudioUrl(String(item.file));
+        const filename = `${jobId}_${audioUrls.length}${audioExtension(url, String(payload.audio_format))}`;
+        const destination = path.join(audioDir, filename);
+        await mkdir(audioDir, { recursive: true });
+        const response = await fetch(url, { signal: AbortSignal.timeout(60_000) });
+        if (!response.ok) throw new Error(`Generated audio download failed (HTTP ${response.status})`);
+        const buffer = Buffer.from(await response.arrayBuffer());
+        if (!buffer.length) throw new Error('ACE-Step returned an empty audio file');
+        const temporary = destination + '.tmp';
+        downloadedPaths.push(temporary, destination);
+        await writeFile(temporary, buffer);
+        await rename(temporary, destination);
+        audioUrls.push(`/audio/${filename}`);
+        metadata = items.find(value => value?.metas)?.metas ?? {};
+      }
+      if (!audioUrls.length) throw new Error('ACE-Step completed but returned no audio files');
+      return {
+        audioUrls, duration: optionalNumber(metadata.duration) ?? optionalNumber(job.params.duration) ?? 0,
+        bpm: optionalNumber(metadata.bpm) ?? job.params.bpm,
+        keyScale: metadata.keyscale && metadata.keyscale !== 'N/A' ? metadata.keyscale : job.params.keyScale,
+        timeSignature: metadata.timesignature && metadata.timesignature !== 'N/A' ? metadata.timesignature : job.params.timeSignature,
+        status: 'succeeded',
+      };
+    }
+    throw new Error('ACE-Step generation timed out after 15 minutes; check logs/ace-step.log');
+  } catch (error) {
+    await Promise.all(downloadedPaths.map(file => rm(file, { force: true })));
+    throw error;
+  } finally {
+    if (stagedDirectory) await rm(stagedDirectory, { recursive: true, force: true });
+  }
+}
 
 async function processQueue(): Promise<void> {
   if (isProcessingQueue) return;
   isProcessingQueue = true;
-
-  while (jobQueue.length > 0) {
-    const jobId = jobQueue[0];
-    const job = activeJobs.get(jobId);
-
-    if (job && job.status === 'queued') {
+  try {
+    while (jobQueue.length) {
+      const jobId = jobQueue[0];
+      const job = activeJobs.get(jobId)!;
+      job.status = 'running';
+      job.stage = 'Submitting to ACE-Step API...';
       try {
-        await processGeneration(jobId, job.params, job);
+        const result = await runRestGeneration(jobId, job);
+        // Complete durable library writes before telling the UI the job succeeded.
+        await job.onFinished?.({ status: 'succeeded', result });
+        job.result = result;
+        job.status = 'succeeded';
+        job.stage = 'Complete';
+        job.progress = 1;
+        console.log(`[Generation ${jobId}] Complete: ${result.audioUrls.length} audio file(s), ${Math.round((Date.now() - job.startTime) / 1000)}s elapsed`);
       } catch (error) {
-        console.error(`Queue processing error for ${jobId}:`, error);
+        job.status = 'failed';
+        job.error = error instanceof Error ? error.message : String(error);
+        job.stage = 'Failed';
+        console.error(`[Generation ${jobId}] Failed: ${job.error}`);
+        try { await job.onFinished?.({ status: 'failed', error: job.error }); }
+        catch (persistError) { console.error(`[Generation ${jobId}] Failed to persist failure`, persistError); }
+      } finally {
+        job.finishedAt = Date.now();
+        jobQueue.shift();
+        jobQueue.forEach((id, index) => { activeJobs.get(id)!.queuePosition = index + 1; });
       }
     }
-
-    // Remove from queue after processing (whether success or failure)
-    jobQueue.shift();
-
-    // Update queue positions for remaining jobs
-    jobQueue.forEach((id, index) => {
-      const queuedJob = activeJobs.get(id);
-      if (queuedJob) {
-        queuedJob.queuePosition = index + 1;
-      }
-    });
+  } finally {
+    isProcessingQueue = false;
   }
-
-  isProcessingQueue = false;
 }
 
-// Submit generation job to queue
-export async function generateMusicViaAPI(params: GenerationParams): Promise<{ jobId: string }> {
-  const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-
-  const job: ActiveJob = {
-    params,
-    startTime: Date.now(),
-    status: 'queued',
-    queuePosition: jobQueue.length + 1,
-  };
-
-  activeJobs.set(jobId, job);
+export async function generateMusicViaAPI(params: GenerationParams, onFinished?: ActiveJob['onFinished']): Promise<{ jobId: string }> {
+  buildReleaseTaskPayload(params); // Reject invalid requests before enqueueing or loading a model.
+  const jobId = `job_${randomUUID()}`;
+  activeJobs.set(jobId, { params, startTime: Date.now(), status: 'queued', queuePosition: jobQueue.length + 1, onFinished });
   jobQueue.push(jobId);
-
-  console.log(`Job ${jobId}: Queued at position ${job.queuePosition}`);
-
-  // Start processing the queue (will be a no-op if already processing)
-  processQueue().catch(err => console.error('Queue processing error:', err));
-
+  // Let the submitting route save the local-to-engine job mapping first.
+  setImmediate(() => { void processQueue().catch(error => console.error('[Generation queue]', error)); });
   return { jobId };
 }
 
-// ---------------------------------------------------------------------------
-// processGeneration — Gradio primary, Python spawn fallback
-// ---------------------------------------------------------------------------
-
-async function processGeneration(
-  jobId: string,
-  params: GenerationParams,
-  job: ActiveJob,
-): Promise<void> {
-  job.status = 'running';
-  job.stage = 'Submitting to ACE-Step API...';
-
-  if ((params.taskType === 'cover' || params.taskType === 'audio2audio') && !params.sourceAudioUrl && !params.audioCodes) {
-    job.status = 'failed';
-    job.error = `task_type='${params.taskType}' requires a source audio or audio codes`;
-    return;
-  }
-
-  try {
-    await processGenerationViaRestApi(jobId, params, job);
-  } catch (error) {
-    console.error(`Job ${jobId}: ACE-Step REST generation failed`, error);
-    job.status = 'failed';
-    job.error = error instanceof Error ? error.message : 'ACE-Step API generation failed';
-  }
-}
-
-async function processGenerationViaRestApi(
-  jobId: string,
-  params: GenerationParams,
-  job: ActiveJob,
-): Promise<void> {
-  const caption = params.style || 'pop music';
-  const prompt = params.customMode ? caption : (params.songDescription || caption);
-  const lyrics = params.instrumental ? '' : (params.lyrics || '');
-  const taskType = params.taskType === 'audio2audio' ? 'cover' : (params.taskType || 'text2music');
-
-  const body: Record<string, unknown> = {
-    prompt,
-    lyrics,
-    task_type: taskType,
-    thinking: params.thinking ?? false,
-    use_format: params.enhance ?? false,
-    vocal_language: params.vocalLanguage || 'en',
-    audio_format: params.audioFormat || 'mp3',
-    audio_duration: params.duration && params.duration > 0 ? params.duration : 60,
-    inference_steps: params.inferenceSteps ?? 8,
-    guidance_scale: params.guidanceScale ?? 7.0,
-    batch_size: Math.min(Math.max(params.batchSize ?? 1, 1), 2),
-    use_random_seed: params.randomSeed !== false,
-    seed: params.seed ?? -1,
-    shift: params.shift ?? 3.0,
-    infer_method: params.inferMethod || 'ode',
-    use_adg: params.useAdg ?? false,
-    cfg_interval_start: params.cfgIntervalStart ?? 0.0,
-    cfg_interval_end: params.cfgIntervalEnd ?? 1.0,
-    // /release_task defaults lm_backend back to vllm unless it is sent on every job.
-    // Force the low-VRAM desktop profile so the request cannot silently re-enable
-    // nano-vLLM after startup and exhaust the RTX 3050's KV cache.
-    lm_backend: 'pt',
-    lm_model_path: 'acestep-5Hz-lm-0.6B',
-    lm_temperature: params.lmTemperature ?? 0.85,
-    lm_cfg_scale: params.lmCfgScale ?? 2.0,
-    lm_top_k: params.lmTopK ?? 0,
-    lm_top_p: params.lmTopP ?? 0.9,
-    lm_negative_prompt: params.lmNegativePrompt || 'NO USER INPUT',
-    use_cot_caption: params.useCotCaption ?? true,
-    use_cot_language: params.useCotLanguage ?? true,
-    allow_lm_batch: false,
-    constrained_decoding_debug: params.constrainedDecodingDebug ?? false,
-  };
-  if (params.ditModel) body.model = params.ditModel;
-  if (params.bpm && params.bpm > 0) body.bpm = params.bpm;
-  if (params.keyScale) body.key_scale = params.keyScale;
-  if (params.timeSignature) body.time_signature = params.timeSignature;
-  if (params.audioCodes) body.audio_code_string = params.audioCodes;
-  if (params.referenceAudioUrl) body.reference_audio_path = resolveAudioPath(params.referenceAudioUrl);
-  if (params.sourceAudioUrl) body.src_audio_path = resolveAudioPath(params.sourceAudioUrl);
-  if (params.repaintingStart !== undefined) body.repainting_start = params.repaintingStart;
-  if (params.repaintingEnd !== undefined) body.repainting_end = params.repaintingEnd;
-  if (params.audioCoverStrength !== undefined) body.audio_cover_strength = params.audioCoverStrength;
-  if (params.instruction) body.instruction = params.instruction;
-  if (params.customTimesteps) body.timesteps = params.customTimesteps;
-
-  console.log(`Job ${jobId}: POST ${ACESTEP_API}/release_task`);
-  const submit = await fetch(`${ACESTEP_API}/release_task`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const submitText = await submit.text();
-  if (!submit.ok) throw new Error(`ACE-Step /release_task failed (${submit.status}): ${submitText}`);
-  const submitJson = JSON.parse(submitText) as any;
-  if (submitJson.code !== 200 || !submitJson.data?.task_id) {
-    throw new Error(submitJson.error || 'ACE-Step did not return a task id');
-  }
-
-  const taskId = String(submitJson.data.task_id);
-  job.taskId = taskId;
-  job.stage = 'Generating audio...';
-
-  const deadline = Date.now() + 15 * 60 * 1000;
-  while (Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    const query = await fetch(`${ACESTEP_API}/query_result`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task_id_list: [taskId] }),
-    });
-    const queryText = await query.text();
-    if (!query.ok) throw new Error(`ACE-Step /query_result failed (${query.status}): ${queryText}`);
-    const queryJson = JSON.parse(queryText) as any;
-    const task = queryJson.data?.[0];
-    if (!task) continue;
-    if (task.status === 2) throw new Error(task.error || 'ACE-Step generation failed');
-    if (task.status !== 1) continue;
-
-    const resultItems = typeof task.result === 'string' ? JSON.parse(task.result) : task.result;
-    const items = Array.isArray(resultItems) ? resultItems : [resultItems];
-    const audioUrls: string[] = [];
-    let resultDuration = params.duration && params.duration > 0 ? params.duration : 0;
-    for (const item of items) {
-      if (!item?.file) continue;
-      const ext = String(item.file).toLowerCase().includes('.flac') ? '.flac' : '.mp3';
-      const filename = `${jobId}_${audioUrls.length}${ext}`;
-      const destPath = path.join(AUDIO_DIR, filename);
-      await mkdir(AUDIO_DIR, { recursive: true });
-      const audioResponse = await fetch(new URL(String(item.file), ACESTEP_API));
-      if (!audioResponse.ok) throw new Error(`Generated audio download failed (${audioResponse.status})`);
-      await writeFile(destPath, Buffer.from(await audioResponse.arrayBuffer()));
-      audioUrls.push(`/audio/${filename}`);
-      if (item.metas?.duration) resultDuration = Number(item.metas.duration);
-    }
-    if (!audioUrls.length) throw new Error('ACE-Step completed but returned no audio files');
-
-    job.status = 'succeeded';
-    job.stage = 'Complete';
-    job.result = {
-      audioUrls,
-      duration: resultDuration,
-      bpm: params.bpm,
-      keyScale: params.keyScale,
-      timeSignature: params.timeSignature,
-      status: 'succeeded',
-    };
-    job.rawResponse = queryJson;
-    console.log(`Job ${jobId}: Completed via ACE-Step REST API with ${audioUrls.length} audio file(s)`);
-    return;
-  }
-  throw new Error('ACE-Step generation timed out after 15 minutes');
-}
-
-async function processGenerationViaGradio(
-  jobId: string,
-  params: GenerationParams,
-  job: ActiveJob,
-): Promise<void> {
-  // Switch DiT model if a specific one was requested
-  if (params.ditModel) {
-    job.stage = `Loading model ${params.ditModel}...`;
-    await switchModelIfNeeded(params.ditModel);
-  }
-
-  const client = await getGradioClient();
-  const args = await buildGradioArgs(params);
-
-  const caption = params.style || 'pop music';
-  const prompt = params.customMode ? caption : (params.songDescription || caption);
-
-  console.log(`Job ${jobId}: Using Gradio /generation_wrapper`, {
-    prompt: prompt.slice(0, 50),
-    duration: params.duration,
-    batchSize: params.batchSize,
-  });
-
-  job.stage = 'Generating music via Gradio...';
-
-  // predict() blocks until generation is complete
-  const result = await client.predict('/generation_wrapper', args);
-  const data = result.data as unknown[];
-
-  if (!Array.isArray(data) || data.length === 0) {
-    throw new Error(`Gradio returned unexpected data format: ${typeof data}`);
-  }
-
-  // Extract audio files from the result
-  // Outputs 0-7: individual audio samples (filepath objects)
-  // Output 8: "All Generated Files" as list[filepath]
-  // Output 9: "Generation Details" (string)
-  // Output 10: "Generation Status" (string)
-  // Output 11: "Seed" (string)
-  const allFiles = data[8]; // list of file objects
-  const genDetails = data[9] as string | undefined;
-  const genStatus = data[10] as string | undefined;
-
-  // Collect audio file objects — prefer the "All Generated Files" list
-  let audioFileObjects: Array<{ url?: string; path?: string; orig_name?: string }> = [];
-
-  if (Array.isArray(allFiles) && allFiles.length > 0) {
-    audioFileObjects = allFiles.filter(
-      (f: any) => f && (f.path || f.url) && isAudioFile(f.orig_name || f.path || '')
-    );
-  }
-
-  // Fallback: check individual sample outputs (indices 0-7)
-  if (audioFileObjects.length === 0) {
-    for (let i = 0; i < 8; i++) {
-      const fileObj = data[i] as any;
-      if (fileObj && (fileObj.path || fileObj.url)) {
-        audioFileObjects.push(fileObj);
-      }
-    }
-  }
-
-  if (audioFileObjects.length === 0) {
-    throw new Error(`Gradio generation returned no audio files. Status: ${genStatus || 'unknown'}. Details: ${genDetails || 'none'}`);
-  }
-
-  // Download audio files to local storage
-  const audioUrls: string[] = [];
-  let actualDuration = 0;
-  const audioFormat = params.audioFormat ?? 'mp3';
-
-  for (const fileObj of audioFileObjects) {
-    const origName = fileObj.orig_name || fileObj.path || '';
-    const ext = origName.includes('.flac') ? '.flac' : `.${audioFormat}`;
-    const filename = `${jobId}_${audioUrls.length}${ext}`;
-    const destPath = path.join(AUDIO_DIR, filename);
-
-    await downloadGradioAudioFile(fileObj, destPath);
-
-    if (audioUrls.length === 0) {
-      actualDuration = getAudioDuration(destPath);
-    }
-
-    audioUrls.push(`/audio/${filename}`);
-  }
-
-  // Parse metadata from generation details if available
-  const metas = parseGenerationDetails(genDetails);
-
-  const finalDuration = actualDuration > 0
-    ? actualDuration
-    : (metas.duration || params.duration || 0);
-
-  job.status = 'succeeded';
-  job.result = {
-    audioUrls,
-    duration: finalDuration,
-    bpm: metas.bpm || params.bpm,
-    keyScale: metas.keyScale || params.keyScale,
-    timeSignature: metas.timeSignature || params.timeSignature,
-    status: 'succeeded',
-  };
-  job.rawResponse = { genDetails, genStatus };
-  console.log(`Job ${jobId}: Completed via Gradio with ${audioUrls.length} audio files`);
-}
-
-function isAudioFile(name: string): boolean {
-  return /\.(mp3|flac|wav|ogg|m4a)$/i.test(name);
-}
-
-function parseGenerationDetails(details: string | undefined): {
-  bpm?: number;
-  duration?: number;
-  keyScale?: string;
-  timeSignature?: string;
-} {
-  if (!details) return {};
-  try {
-    // Generation details may contain key-value pairs
-    const bpmMatch = details.match(/BPM:\s*(\d+)/i);
-    const durationMatch = details.match(/Duration:\s*([\d.]+)/i);
-    const keyMatch = details.match(/Key:\s*([A-G][#b]?\s*(?:major|minor))/i);
-    const timeMatch = details.match(/Time Signature:\s*(\d+\/\d+)/i);
-    return {
-      bpm: bpmMatch ? parseInt(bpmMatch[1]) : undefined,
-      duration: durationMatch ? parseFloat(durationMatch[1]) : undefined,
-      keyScale: keyMatch ? keyMatch[1] : undefined,
-      timeSignature: timeMatch ? timeMatch[1] : undefined,
-    };
-  } catch {
-    return {};
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Python spawn fallback (kept from original for offline/fallback use)
-// ---------------------------------------------------------------------------
-
-async function processGenerationViaPython(
-  jobId: string,
-  params: GenerationParams,
-  job: ActiveJob,
-): Promise<void> {
-  const caption = params.style || 'pop music';
-  const prompt = params.customMode ? caption : (params.songDescription || caption);
-  const lyrics = params.instrumental ? '' : (params.lyrics || '');
-
-  console.log(`Job ${jobId}: Using Python spawn (Gradio not available)`, {
-    prompt: prompt.slice(0, 50),
-    lyricsPreview: lyrics.slice(0, 50),
-    duration: params.duration,
-    batchSize: params.batchSize,
-  });
-
-  try {
-    const jobOutputDir = path.join(ACESTEP_DIR, 'output', jobId);
-    await mkdir(jobOutputDir, { recursive: true });
-
-    const durationToSend = params.duration && params.duration > 0 ? params.duration : 60;
-    const args = [
-      '--prompt', prompt,
-      '--duration', String(durationToSend),
-      '--batch-size', String(params.batchSize ?? 1),
-      '--infer-steps', String(params.inferenceSteps ?? 8),
-      '--guidance-scale', String(params.guidanceScale ?? 10.0),
-      '--audio-format', params.audioFormat ?? 'mp3',
-      '--output-dir', jobOutputDir,
-      '--json',
-    ];
-
-    if (lyrics) args.push('--lyrics', lyrics);
-    if (params.instrumental) args.push('--instrumental');
-    if (params.bpm && params.bpm > 0) args.push('--bpm', String(params.bpm));
-    if (params.keyScale) args.push('--key-scale', params.keyScale);
-    if (params.timeSignature) args.push('--time-signature', params.timeSignature);
-    if (params.vocalLanguage) args.push('--vocal-language', params.vocalLanguage);
-    if (params.seed !== undefined && params.seed >= 0 && !params.randomSeed) args.push('--seed', String(params.seed));
-    if (params.shift !== undefined) args.push('--shift', String(params.shift));
-    const resolvedTaskType = params.taskType === 'audio2audio' ? 'cover' : params.taskType;
-    if (resolvedTaskType && resolvedTaskType !== 'text2music') args.push('--task-type', resolvedTaskType);
-
-    if (params.referenceAudioUrl) {
-      args.push('--reference-audio', resolveAudioPath(params.referenceAudioUrl));
-    }
-    if (params.sourceAudioUrl) {
-      args.push('--src-audio', resolveAudioPath(params.sourceAudioUrl));
-    }
-    if (params.audioCodes) args.push('--audio-codes', params.audioCodes);
-    if (params.repaintingStart !== undefined && params.repaintingStart > 0) args.push('--repainting-start', String(params.repaintingStart));
-    if (params.repaintingEnd !== undefined && params.repaintingEnd > 0) args.push('--repainting-end', String(params.repaintingEnd));
-    if (params.taskType === 'cover' || params.taskType === 'repaint' || params.sourceAudioUrl) {
-      args.push('--audio-cover-strength', String(params.audioCoverStrength ?? 1.0));
-    } else if (params.audioCoverStrength !== undefined && params.audioCoverStrength !== 1.0) {
-      args.push('--audio-cover-strength', String(params.audioCoverStrength));
-    }
-    if (params.instruction) args.push('--instruction', params.instruction);
-    if (params.thinking) args.push('--thinking');
-    if (params.lmTemperature !== undefined) args.push('--lm-temperature', String(params.lmTemperature));
-    if (params.lmCfgScale !== undefined) args.push('--lm-cfg-scale', String(params.lmCfgScale));
-    if (params.lmTopK !== undefined && params.lmTopK > 0) args.push('--lm-top-k', String(params.lmTopK));
-    if (params.lmTopP !== undefined) args.push('--lm-top-p', String(params.lmTopP));
-    if (params.lmNegativePrompt) args.push('--lm-negative-prompt', params.lmNegativePrompt);
-    // Note: --lm-backend and --lm-model are not supported by simple_generate.py
-    if (params.useCotMetas === false) args.push('--no-cot-metas');
-    if (params.useCotCaption === false) args.push('--no-cot-caption');
-    if (params.useCotLanguage === false) args.push('--no-cot-language');
-    if (params.useAdg) args.push('--use-adg');
-    if (params.cfgIntervalStart !== undefined && params.cfgIntervalStart > 0) args.push('--cfg-interval-start', String(params.cfgIntervalStart));
-    if (params.cfgIntervalEnd !== undefined && params.cfgIntervalEnd < 1.0) args.push('--cfg-interval-end', String(params.cfgIntervalEnd));
-
-    const result = await runPythonGeneration(args);
-
-    if (!result.success) {
-      throw new Error(result.error || 'Generation failed');
-    }
-
-    if (!result.audio_paths || result.audio_paths.length === 0) {
-      throw new Error('No audio files generated');
-    }
-
-    const audioUrls: string[] = [];
-    let actualDuration = 0;
-    for (const srcPath of result.audio_paths) {
-      const ext = srcPath.includes('.flac') ? '.flac' : '.mp3';
-      const filename = `${jobId}_${audioUrls.length}${ext}`;
-      const destPath = path.join(AUDIO_DIR, filename);
-
-      await mkdir(AUDIO_DIR, { recursive: true });
-      await copyFile(srcPath, destPath);
-
-      if (audioUrls.length === 0) {
-        actualDuration = getAudioDuration(destPath);
-      }
-
-      audioUrls.push(`/audio/${filename}`);
-    }
-
-    try {
-      await rm(jobOutputDir, { recursive: true, force: true });
-    } catch (cleanupError) {
-      console.warn(`Job ${jobId}: Failed to cleanup output dir`, cleanupError);
-    }
-
-    const finalDuration = actualDuration > 0 ? actualDuration : (params.duration && params.duration > 0 ? params.duration : 0);
-
-    job.status = 'succeeded';
-    job.result = {
-      audioUrls,
-      duration: finalDuration,
-      bpm: params.bpm,
-      keyScale: params.keyScale,
-      timeSignature: params.timeSignature,
-      status: 'succeeded',
-    };
-    job.rawResponse = result;
-    console.log(`Job ${jobId}: Completed via Python in ${result.elapsed_seconds?.toFixed(1)}s with ${audioUrls.length} audio files`);
-
-  } catch (error) {
-    console.error(`Job ${jobId}: Generation failed`, error);
-    job.status = 'failed';
-    job.error = error instanceof Error ? error.message : 'Generation failed';
-
-    try {
-      const jobOutputDir = path.join(ACESTEP_DIR, 'output', jobId);
-      await rm(jobOutputDir, { recursive: true, force: true });
-    } catch { /* ignore cleanup errors */ }
-  }
-}
-
-interface PythonResult {
-  success: boolean;
-  audio_paths?: string[];
-  elapsed_seconds?: number;
-  error?: string;
-}
-
-function runPythonGeneration(scriptArgs: string[], timeoutMs = 600000): Promise<PythonResult> {
-  return new Promise((resolve) => {
-    const pythonPath = resolvePythonPath(ACESTEP_DIR);
-    const args = [PYTHON_SCRIPT, ...scriptArgs];
-
-    const proc = spawn(pythonPath, args, {
-      cwd: ACESTEP_DIR,
-      env: {
-        ...process.env,
-        ACESTEP_PATH: ACESTEP_DIR,
-      },
-    });
-
-    // Kill process after timeout (default 10 minutes)
-    const timer = setTimeout(() => {
-      proc.kill('SIGTERM');
-      setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL'); }, 5000);
-      resolve({ success: false, error: `Generation timed out after ${timeoutMs / 1000}s` });
-    }, timeoutMs);
-
-    let stdout = '';
-    let stderr = '';
-
-    proc.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    proc.stderr.on('data', (data) => {
-      stderr += data.toString();
-      const lines = data.toString().split('\n');
-      for (const line of lines) {
-        if (line.trim()) {
-          console.log(`[ACE-Step] ${line}`);
-        }
-      }
-    });
-
-    proc.on('close', (code) => {
-      clearTimeout(timer);
-      if (code !== 0) {
-        resolve({ success: false, error: stderr || `Process exited with code ${code}` });
-        return;
-      }
-
-      const lines = stdout.split('\n').filter(l => l.trim());
-      const jsonLine = lines.find(l => l.startsWith('{'));
-
-      if (!jsonLine) {
-        resolve({ success: false, error: 'No JSON output from generation script' });
-        return;
-      }
-
-      try {
-        const result = JSON.parse(jsonLine);
-        resolve(result);
-      } catch {
-        resolve({ success: false, error: 'Invalid JSON from generation script' });
-      }
-    });
-
-    proc.on('error', (err) => {
-      clearTimeout(timer);
-      resolve({ success: false, error: err.message });
-    });
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Job status (simplified — no more REST polling for progress)
-// ---------------------------------------------------------------------------
-
 export async function getJobStatus(jobId: string): Promise<JobStatus> {
   const job = activeJobs.get(jobId);
-
-  if (!job) {
-    return {
-      status: 'failed',
-      error: 'Job not found',
-    };
-  }
-
-  if (job.status === 'succeeded' && job.result) {
-    return {
-      status: 'succeeded',
-      result: job.result,
-    };
-  }
-
-  if (job.status === 'failed') {
-    return {
-      status: 'failed',
-      error: job.error || 'Generation failed',
-    };
-  }
-
-  const elapsed = Math.floor((Date.now() - job.startTime) / 1000);
-
-  if (job.status === 'queued') {
-    return {
-      status: job.status,
-      queuePosition: job.queuePosition,
-      etaSeconds: (job.queuePosition || 1) * 180,
-    };
-  }
-
-  // Running — Gradio handles its own queue, we just report estimated time
+  if (!job) return { status: 'failed', error: 'Backend restarted or job expired; submit a new generation' };
   return {
-    status: job.status,
-    etaSeconds: Math.max(0, 180 - elapsed),
-    progress: job.progress,
-    stage: job.stage,
+    status: job.status, queuePosition: job.status === 'queued' ? job.queuePosition : undefined,
+    progress: job.progress, stage: job.stage, result: job.result, error: job.error,
   };
 }
 
-// Get raw response for debugging
 export function getJobRawResponse(jobId: string): unknown | null {
-  const job = activeJobs.get(jobId);
-  return job?.rawResponse || null;
+  return activeJobs.get(jobId)?.rawResponse ?? null;
 }
 
-// ---------------------------------------------------------------------------
-// Audio helpers (unchanged)
-// ---------------------------------------------------------------------------
-
 export async function getAudioStream(audioPath: string): Promise<Response> {
-  if (audioPath.startsWith('http')) {
-    return fetch(audioPath);
-  }
-
   if (audioPath.startsWith('/audio/')) {
-    const localPath = path.join(AUDIO_DIR, audioPath.replace('/audio/', ''));
     try {
-      const buffer = await readFile(localPath);
-      const ext = localPath.endsWith('.flac') ? 'flac' : 'mpeg';
-      return new Response(buffer, {
-        status: 200,
-        headers: { 'Content-Type': `audio/${ext}` }
-      });
-    } catch (err) {
-      console.error('Failed to read local audio file:', localPath, err);
+      const filename = await localAudioPath(audioPath);
+      const buffer = await readFile(filename);
+      const extension = path.extname(filename).toLowerCase();
+      const contentType = extension === '.wav' ? 'audio/wav' : extension === '.flac' ? 'audio/flac' : 'audio/mpeg';
+      return new Response(buffer, { headers: { 'Content-Type': contentType } });
+    } catch {
       return new Response(null, { status: 404 });
     }
   }
-
-  // Absolute path — try reading directly from disk (Gradio output files)
-  if (audioPath.startsWith('/')) {
-    try {
-      const buffer = await readFile(audioPath);
-      const ext = audioPath.endsWith('.flac') ? 'flac' : audioPath.endsWith('.wav') ? 'wav' : 'mpeg';
-      return new Response(buffer, {
-        status: 200,
-        headers: { 'Content-Type': `audio/${ext}` }
-      });
-    } catch {
-      // Fall through to Gradio API
-    }
-  }
-
-  const url = `${ACESTEP_API}/v1/audio?path=${encodeURIComponent(audioPath)}`;
-  console.log('Fetching audio from:', url);
-  return fetch(url);
-}
-
-export async function downloadAudio(remoteUrl: string, songId: string): Promise<string> {
-  await mkdir(AUDIO_DIR, { recursive: true });
-
-  const response = await getAudioStream(remoteUrl);
-  if (!response.ok) {
-    throw new Error(`Failed to download audio: ${response.status}`);
-  }
-
-  const buffer = await response.arrayBuffer();
-  const ext = remoteUrl.includes('.flac') ? '.flac' : '.mp3';
-  const filename = `${songId}${ext}`;
-  const filepath = path.join(AUDIO_DIR, filename);
-
-  await writeFile(filepath, Buffer.from(buffer));
-  console.log(`Downloaded audio to ${filepath}`);
-
-  return `/audio/${filename}`;
-}
-
-export async function downloadAudioToBuffer(remoteUrl: string): Promise<{ buffer: Buffer; size: number }> {
-  const response = await getAudioStream(remoteUrl);
-  if (!response.ok) {
-    throw new Error(`Failed to download audio: ${response.status}`);
-  }
-
-  const arrayBuffer = await response.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
-  return { buffer, size: buffer.length };
+  // Never proxy arbitrary URLs or read arbitrary local files from a query parameter.
+  return fetch(engineAudioUrl(audioPath), { signal: AbortSignal.timeout(60_000) });
 }
 
 export function cleanupJob(jobId: string): void {
-  activeJobs.delete(jobId);
+  const job = activeJobs.get(jobId);
+  if (job?.finishedAt) activeJobs.delete(jobId);
 }
 
-export function cleanupOldJobs(maxAgeMs: number = 3600000): void {
-  const now = Date.now();
+export function cleanupOldJobs(maxAgeMs = 3_600_000): void {
   for (const [jobId, job] of activeJobs) {
-    if (now - job.startTime > maxAgeMs) {
-      activeJobs.delete(jobId);
-    }
+    if (job.finishedAt && Date.now() - job.finishedAt > maxAgeMs) activeJobs.delete(jobId);
   }
 }

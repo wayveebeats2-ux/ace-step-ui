@@ -69,6 +69,7 @@ internal static class Program
                 }
                 catch (Exception ex)
                 {
+                    StopChildren();
                     progress.Style = ProgressBarStyle.Blocks;
                     status.Text = "Startup failed.";
                     MessageBox.Show(ex.Message, "ACE-Step UI", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -88,6 +89,16 @@ internal static class Program
     private static async Task StartEverything(Action<string> status)
     {
         var root = AppContext.BaseDirectory;
+        foreach (var port in new[] { 8001, 3001, 3000 })
+        {
+            var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, port);
+            try { probe.Start(); }
+            catch (System.Net.Sockets.SocketException)
+            {
+                throw new InvalidOperationException($"Port {port} is already in use. Close the existing ACE-Step/UI instance before launching again.");
+            }
+            finally { probe.Stop(); }
+        }
         var engine = FindEngine(root) ?? throw new InvalidOperationException(
             "ACE-Step-1.5 was not found.\n\nPlace the official Windows portable ACE-Step-1.5 folder next to ACE-Step UI.exe (or inside an 'engine' folder), then launch again.");
 
@@ -103,15 +114,28 @@ internal static class Program
             throw new InvalidOperationException("The portable UI runtime is incomplete. Re-extract the release ZIP.");
 
         status("✓ Portable engine found\n✓ Python runtime found\n⟳ Starting ACE-Step engine…\n⟳ Loading AI models into memory…");
+        AppendLog(Path.Combine(root, "logs", "ace-step.log"), "Desktop profile: DiT=acestep-v15-turbo; LM=acestep-5Hz-lm-0.6B/PT; component, DiT and LM CPU offload enabled; adaptive tiled GPU VAE decode.");
         Start(python, $"{Quote(apiServer)} --host 127.0.0.1 --port 8001", engine,
             new Dictionary<string, string>
             {
                 ["ACESTEP_USE_FLASH_ATTENTION"] = "false",
+                ["PYTHONUNBUFFERED"] = "1",
+                ["ACESTEP_CONFIG_PATH"] = "acestep-v15-turbo",
+                ["ACESTEP_CONFIG_PATH2"] = "",
+                ["ACESTEP_CONFIG_PATH3"] = "",
+                // REST startup defaults DiT offload to false even on tier3.
+                // These supported flags release weights between LM, DiT and VAE stages.
+                ["ACESTEP_OFFLOAD_TO_CPU"] = "true",
+                ["ACESTEP_OFFLOAD_DIT_TO_CPU"] = "true",
+                ["ACESTEP_LM_OFFLOAD_TO_CPU"] = "true",
+                ["ACESTEP_VAE_ON_CPU"] = "false",
                 // The official portable .env defaults to the 1.7B LM. On an 8 GB GPU
                 // ACE-Step tier3 supports the 0.6B LM, so make the portable launcher
                 // deterministic instead of inheriting the heavier .env choice.
                 ["ACESTEP_LM_MODEL_PATH"] = "acestep-5Hz-lm-0.6B",
-                // ACE-Step recommends the PyTorch LM backend for 6-8 GB GPUs. vLLM\n                // reserves a KV cache on the 3050 and can leave too little VRAM for VAE decode.\n                ["ACESTEP_LM_BACKEND"] = "pt",
+                // ACE-Step recommends the PyTorch LM backend for 6-8 GB GPUs. vLLM
+                // reserves a KV cache on the 3050 and can leave too little VRAM for VAE decode.
+                ["ACESTEP_LM_BACKEND"] = "pt",
                 ["ACESTEP_INIT_LLM"] = "auto"
             }, "ace-step.log");
 
@@ -131,7 +155,7 @@ internal static class Program
             throw new InvalidOperationException("ACE-Step UI backend failed to start.");
 
         status("✓ AI models loaded\n✓ ACE-Step API ready\n✓ Local library & backend ready\n⟳ Starting desktop interface…");
-        Start(node, $"{Quote(vite)} preview --host 127.0.0.1 --port 3000", Path.Combine(root, "app"));
+        Start(node, $"{Quote(vite)} preview --host 127.0.0.1 --port 3000 --strictPort", Path.Combine(root, "app"));
         if (!await WaitFor("http://127.0.0.1:3000", TimeSpan.FromMinutes(2)))
             throw new InvalidOperationException("ACE-Step UI frontend failed to start.");
     }
@@ -186,7 +210,7 @@ internal static class Program
             try
             {
                 using var response = await client.GetAsync(url);
-                if ((int)response.StatusCode < 500) return true;
+                if (response.IsSuccessStatusCode) return true;
             }
             catch { }
             await Task.Delay(1000);
@@ -200,6 +224,7 @@ internal static class Program
     {
         lock (LogLock)
         {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.AppendAllText(path, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {line}{Environment.NewLine}", Encoding.UTF8);
         }
     }

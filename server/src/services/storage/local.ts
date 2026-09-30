@@ -1,17 +1,13 @@
 import { writeFile, unlink, stat, mkdir, copyFile } from 'fs/promises';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { config } from '../../config/index.js';
 import type { StorageProvider } from './index.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const AUDIO_DIR = path.join(__dirname, '../../../public/audio');
 
 export class LocalStorageProvider implements StorageProvider {
   private audioDir: string;
 
   constructor() {
-    this.audioDir = AUDIO_DIR;
+    this.audioDir = config.storage.audioDir;
   }
 
   async upload(key: string, data: Buffer, _contentType: string): Promise<string> {

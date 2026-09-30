@@ -158,7 +158,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
   const [duration, setDuration] = useState(-1);
   const [batchSize, setBatchSize] = useState(() => {
     const stored = localStorage.getItem('ace-batchSize');
-    return stored ? Number(stored) : 1;
+    return stored && Number.isFinite(Number(stored)) ? Math.min(2, Math.max(1, Math.floor(Number(stored)))) : 1;
   });
   const [bulkCount, setBulkCount] = useState(() => {
     const stored = localStorage.getItem('ace-bulkCount');
@@ -170,12 +170,10 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
   const [thinking, setThinking] = useState(false); // Default false for GPU compatibility
   const [enhance, setEnhance] = useState(false); // AI Enhance: uses LLM to enrich caption & generate metadata
   const [audioFormat, setAudioFormat] = useState<'mp3' | 'flac'>('mp3');
-  const [inferenceSteps, setInferenceSteps] = useState(12);
+  const [inferenceSteps, setInferenceSteps] = useState(8);
   const [inferMethod, setInferMethod] = useState<'ode' | 'sde'>('ode');
-  const [lmBackend, setLmBackend] = useState<'pt' | 'vllm'>('pt');
-  const [lmModel, setLmModel] = useState(() => {
-    return localStorage.getItem('ace-lmModel') || 'acestep-5Hz-lm-0.6B';
-  });
+  const lmBackend = 'pt' as const;
+  const lmModel = 'acestep-5Hz-lm-0.6B';
   const [shift, setShift] = useState(3.0);
 
   // LM Parameters (under Expert)
@@ -228,7 +226,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
 
   // Model selection
   const [selectedModel, setSelectedModel] = useState<string>(() => {
-    return localStorage.getItem('ace-model') || 'acestep-v15-turbo-shift3';
+    return localStorage.getItem('ace-model') || 'acestep-v15-turbo';
   });
   const [showModelMenu, setShowModelMenu] = useState(false);
   const modelMenuRef = useRef<HTMLDivElement>(null);
@@ -267,8 +265,12 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
 
   // Check if model is a turbo variant
   const isTurboModel = (modelId: string): boolean => {
-    return modelId.includes('turbo');
+    return /turbo|dmd/i.test(modelId);
   };
+
+  useEffect(() => {
+    if (isTurboModel(selectedModel)) setInferenceSteps(value => Math.min(8, Math.max(1, value)));
+  }, [selectedModel, inferenceSteps]);
 
   const [isUploadingReference, setIsUploadingReference] = useState(false);
   const [isUploadingSource, setIsUploadingSource] = useState(false);
@@ -1347,7 +1349,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
                 label={t('variations')}
                 value={batchSize}
                 min={1}
-                max={4}
+                max={2}
                 step={1}
                 onChange={setBatchSize}
               />
@@ -1355,7 +1357,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
                 <input
                   type="range"
                   min="1"
-                  max="4"
+                  max="2"
                   step="1"
                   value={batchSize}
                   onChange={setBatchSize}
@@ -1924,7 +1926,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
               label={t('batchSize')}
               value={batchSize}
               min={1}
-              max={4}
+              max={2}
               step={1}
               onChange={setBatchSize}
               helpText={t('numberOfVariations')}
@@ -1962,15 +1964,17 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
               label={t('inferenceSteps')}
               value={inferenceSteps}
               min={1}
-              max={isTurboModel(selectedModel) ? 20 : 200}
+              max={isTurboModel(selectedModel) ? 8 : 200}
               step={1}
               onChange={setInferenceSteps}
               helpText={t('moreStepsBetterQuality')}
               title="More steps usually improves quality but slows generation."
             />
 
-            {/* Guidance Scale */}
-            <EditableSlider
+            {/* Turbo/DMD is distilled and does not use classifier-free guidance. */}
+            {isTurboModel(selectedModel) ? (
+              <p className="text-[10px] text-zinc-500">Turbo/DMD uses guidance 1.0; classifier-free guidance applies to base/SFT models.</p>
+            ) : <EditableSlider
               label={t('guidanceScale')}
               value={guidanceScale}
               min={1}
@@ -1980,7 +1984,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
               formatDisplay={(val) => val.toFixed(1)}
               helpText={t('howCloselyFollowPrompt')}
               title="How strongly the model follows the prompt. Higher = stricter, lower = freer."
-            />
+            />}
 
             {/* Audio Format & Inference Method */}
             <div className="grid grid-cols-2 gap-3">
@@ -2013,13 +2017,12 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
               <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">{t('lmBackendLabel')}</label>
               <select
                 value={lmBackend}
-                onChange={(e) => setLmBackend(e.target.value as 'pt' | 'vllm')}
+                disabled
                 className="w-full bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-lg px-2 py-1.5 text-xs text-zinc-900 dark:text-white focus:outline-none"
               >
                 <option value="pt">{t('lmBackendPt')}</option>
-                <option value="vllm">{t('lmBackendVllm')}</option>
               </select>
-              <p className="text-[10px] text-zinc-500">{t('lmBackendHint')}</p>
+              <p className="text-[10px] text-zinc-500">The 8 GB desktop profile uses PyTorch with CPU offload between stages.</p>
             </div>
 
             {/* LM Model */}
@@ -2027,12 +2030,10 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
               <label className="text-xs font-medium text-zinc-600 dark:text-zinc-400">{t('lmModelLabel')}</label>
               <select
                 value={lmModel}
-                onChange={(e) => { const v = e.target.value; setLmModel(v); localStorage.setItem('ace-lmModel', v); }}
+                disabled
                 className="w-full bg-zinc-50 dark:bg-black/20 border border-zinc-200 dark:border-white/10 rounded-lg px-2 py-1.5 text-xs text-zinc-900 dark:text-white focus:outline-none"
               >
                 <option value="acestep-5Hz-lm-0.6B">{t('lmModel06B')}</option>
-                <option value="acestep-5Hz-lm-1.7B">{t('lmModel17B')}</option>
-                <option value="acestep-5Hz-lm-4B">{t('lmModel4B')}</option>
               </select>
               <p className="text-[10px] text-zinc-500">{t('lmModelHint')}</p>
             </div>

@@ -30,37 +30,3 @@ export async function getGradioClient(): Promise<Client> {
 
   return connectionPromise;
 }
-
-/**
- * Reset the cached Gradio client, forcing a new connection on next use.
- */
-export function resetGradioClient(): void {
-  clientInstance = null;
-  connectionPromise = null;
-}
-
-/**
- * Check if the Gradio app is reachable.
- * Tries multiple well-known endpoints to handle version differences.
- */
-export async function isGradioAvailable(): Promise<boolean> {
-  const baseUrl = config.acestep.apiUrl;
-  const candidates = [
-    `${baseUrl}/gradio_api/info`, // Gradio 5+
-    `${baseUrl}/info`,            // Gradio 4.x fallback
-    `${baseUrl}/`,                // Any HTTP response means server is up
-  ];
-
-  for (const url of candidates) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 5000);
-      const response = await fetch(url, { signal: controller.signal });
-      clearTimeout(timer);
-      if (response.ok || response.status < 500) return true;
-    } catch {
-      // Try next candidate
-    }
-  }
-  return false;
-}

@@ -10,6 +10,15 @@ on:
       - 'components/**'
       - 'services/**'
       - 'App.tsx'
+      - 'index.html'
+      - 'index.tsx'
+      - 'vite.config.ts'
+      - 'tsconfig.json'
+      - 'package*.json'
+      - 'types.ts'
+      - 'contexts/**'
+      - 'hooks/**'
+      - 'i18n/**'
       - '.github/workflows/build-windows-portable.yml'
 
 jobs:
@@ -34,11 +43,13 @@ jobs:
         shell: pwsh
         run: |
           npm ci
-          npm run build
           Push-Location server
           npm ci
           npm run build
+          npm test
           Pop-Location
+          npx tsc --noEmit
+          npm run build
 
       - name: Download portable Node runtime
         shell: pwsh
@@ -56,11 +67,13 @@ jobs:
           Copy-Item dist portable/app/dist -Recurse
           Copy-Item node_modules portable/app/node_modules -Recurse
           Copy-Item package.json portable/app/package.json
+          Copy-Item vite.config.ts portable/app/vite.config.ts
 
           Copy-Item server/dist portable/app/server/dist -Recurse
           Copy-Item server/node_modules portable/app/server/node_modules -Recurse
           Copy-Item server/public portable/app/server/public -Recurse
           Copy-Item server/audio-editor portable/app/server/audio-editor -Recurse
+          Copy-Item server/scripts portable/app/server/scripts -Recurse
           Copy-Item server/.env.example portable/app/server/.env
           New-Item -ItemType Directory -Force portable/app/server/data | Out-Null
 

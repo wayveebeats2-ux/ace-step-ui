@@ -700,9 +700,14 @@ function AppContent() {
     if (!token) return;
     if (activeJobsRef.current.has(jobId)) return;
 
+    let pollInFlight = false;
+    let consecutiveFailures = 0;
     const pollInterval = setInterval(async () => {
+      if (pollInFlight) return;
+      pollInFlight = true;
       try {
         const status = await generateApi.getStatus(jobId, token);
+        consecutiveFailures = 0;
         const normalizedProgress = Number.isFinite(Number(status.progress))
           ? (Number(status.progress) > 1 ? Number(status.progress) / 100 : Number(status.progress))
           : undefined;
@@ -737,20 +742,20 @@ function AppContent() {
         }
       } catch (pollError) {
         console.error(`Polling error for job ${jobId}:`, pollError);
-        cleanupJob(jobId, tempId);
+        if (++consecutiveFailures >= 5) {
+          cleanupJob(jobId, tempId);
+          showToast('Could not reach the backend. Generation continues there; refresh your library to check its result.', 'error');
+        }
+      } finally {
+        pollInFlight = false;
       }
     }, 2000);
 
     activeJobsRef.current.set(jobId, { tempId, pollInterval });
     setActiveJobCount(activeJobsRef.current.size);
 
-    setTimeout(() => {
-      if (activeJobsRef.current.has(jobId)) {
-        console.warn(`Job ${jobId} timed out`);
-        cleanupJob(jobId, tempId);
-        showToast(t('generationTimedOut'), 'error');
-      }
-    }, 600000);
+    // The backend owns the running-task deadline. Queued jobs may legitimately
+    // wait longer than a single task, and completion is saved even if this UI closes.
   }, [token, cleanupJob, refreshSongsList]);
 
   const buildTempSongFromParams = (params: GenerationParams, tempId: string, createdAt?: string) => ({
@@ -803,6 +808,7 @@ function AppContent() {
         lyrics: params.lyrics,
         style: params.style,
         title: params.title,
+        ditModel: params.ditModel,
         instrumental: params.instrumental,
         vocalLanguage: params.vocalLanguage,
         duration: params.duration && params.duration > 0 ? params.duration : undefined,
@@ -815,6 +821,7 @@ function AppContent() {
         randomSeed: params.randomSeed,
         seed: params.seed,
         thinking: params.thinking,
+        enhance: params.enhance,
         audioFormat: params.audioFormat,
         inferMethod: params.inferMethod,
         shift: params.shift,
