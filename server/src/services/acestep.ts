@@ -528,6 +528,11 @@ async function processGenerationViaRestApi(
     use_adg: params.useAdg ?? false,
     cfg_interval_start: params.cfgIntervalStart ?? 0.0,
     cfg_interval_end: params.cfgIntervalEnd ?? 1.0,
+    // /release_task defaults lm_backend back to vllm unless it is sent on every job.
+    // Force the low-VRAM desktop profile so the request cannot silently re-enable
+    // nano-vLLM after startup and exhaust the RTX 3050's KV cache.
+    lm_backend: 'pt',
+    lm_model_path: 'acestep-5Hz-lm-0.6B',
     lm_temperature: params.lmTemperature ?? 0.85,
     lm_cfg_scale: params.lmCfgScale ?? 2.0,
     lm_top_k: params.lmTopK ?? 0,
@@ -535,7 +540,7 @@ async function processGenerationViaRestApi(
     lm_negative_prompt: params.lmNegativePrompt || 'NO USER INPUT',
     use_cot_caption: params.useCotCaption ?? true,
     use_cot_language: params.useCotLanguage ?? true,
-    allow_lm_batch: params.allowLmBatch ?? true,
+    allow_lm_batch: false,
     constrained_decoding_debug: params.constrainedDecodingDebug ?? false,
   };
   if (params.ditModel) body.model = params.ditModel;
