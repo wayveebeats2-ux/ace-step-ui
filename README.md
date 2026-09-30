@@ -36,7 +36,7 @@
   <img src="https://img.shields.io/badge/TailwindCSS-3.x-06B6D4?style=flat-square&logo=tailwindcss" alt="TailwindCSS">
   <img src="https://img.shields.io/badge/SQLite-Local_First-003B57?style=flat-square&logo=sqlite" alt="SQLite">
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License">
-  <img src="https://img.shields.io/github/stars/fspecii/ace-step-ui?style=flat-square" alt="Stars">
+  <img src="https://img.shields.io/github/stars/wayveebeats2-ux/ace-step-ui?style=flat-square" alt="Stars">
 </p>
 
 ---
@@ -276,7 +276,7 @@ cd ..
 #### Linux / macOS
 ```bash
 # Clone the UI
-git clone https://github.com/fspecii/ace-step-ui
+git clone https://github.com/wayveebeats2-ux/ace-step-ui
 cd ace-step-ui
 
 # Run setup script (installs all dependencies)
@@ -286,7 +286,7 @@ cd ace-step-ui
 #### Windows
 ```batch
 REM Clone the UI
-git clone https://github.com/fspecii/ace-step-ui
+git clone https://github.com/wayveebeats2-ux/ace-step-ui
 cd ace-step-ui
 
 REM Run setup script (installs all dependencies)
@@ -431,12 +431,21 @@ Full control over every parameter:
 
 ---
 
+## 🧪 Current Local Build Notes
+
+This fork is being actively tested as a **local-first ACE-Step workstation**. For the most reliable Windows setup, start with the **PT backend** and **batch size 1**, confirm a single generation completes, then enable heavier options one at a time. This makes VRAM/KV-cache failures much easier to isolate.
+
+When diagnosing a failed generation, keep the terminal running ACE-Step visible: the UI may only show that generation failed, while the ACE-Step console contains the useful CUDA, vLLM, KV-cache, or model-loading error.
+
+---
+
 ## 🐛 Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
 | **ACE-Step not reachable** | Ensure Gradio server is running with `--enable-api` flag (see Usage section) |
 | **CUDA out of memory** | Use `--backend pt` (default), set batch size to **1**, reduce duration, or disable Thinking Mode |
+| **`Insufficient KV cache to schedule sequence`** | The LLM/vLLM backend does not have enough KV-cache headroom for the request. Prefer the **PT backend** on constrained GPUs, keep batch size at **1**, shorten/trim large prompts, and avoid running other VRAM-heavy workloads while generating. If using vLLM intentionally, increase its available GPU-memory allocation only when your GPU has safe VRAM headroom. |
 | **4GB GPU - Out of memory** | Use **PT** backend (default), batch size **1**, and keep **Thinking Mode OFF**. LLM features require 12GB+ |
 | **Genre always sounds like ballad** | Enable **AI Enhance** toggle in the Style section — it enriches your tags with proper metadata |
 | **AttributeError: 'NoneType'** | Update to latest ACE-Step-1.5 (fix merged in PR #109) |
