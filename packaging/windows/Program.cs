@@ -111,6 +111,7 @@ internal static class Program
                 // ACE-Step tier3 supports the 0.6B LM, so make the portable launcher
                 // deterministic instead of inheriting the heavier .env choice.
                 ["ACESTEP_LM_MODEL_PATH"] = "acestep-5Hz-lm-0.6B",
+                // ACE-Step recommends the PyTorch LM backend for 6-8 GB GPUs. vLLM\n                // reserves a KV cache on the 3050 and can leave too little VRAM for VAE decode.\n                ["ACESTEP_LM_BACKEND"] = "pt",
                 ["ACESTEP_INIT_LLM"] = "auto"
             }, "ace-step.log");
 
