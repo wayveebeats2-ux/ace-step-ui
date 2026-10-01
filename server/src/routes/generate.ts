@@ -17,7 +17,7 @@ import {
   resolvePythonPath,
 } from '../services/acestep.js';
 import { persistGenerationOutcome } from '../services/generationPersistence.js';
-import { buildReleaseTaskPayload } from '../services/acestep-rest.js';
+import { buildReleaseTaskPayload, engineModelName } from '../services/acestep-rest.js';
 import { getStorageProvider } from '../services/storage/factory.js';
 
 const router = Router();
@@ -489,15 +489,15 @@ router.get('/models', async (_req, res: Response) => {
       'acestep-v15-turbo-continuous',   // submodel
     ];
 
-    // Query Gradio /v1/models to get the currently loaded/active model
+    // Query REST /v1/models, including the OpenRouter-compatible response.
     let activeModel: string | null = null;
     try {
       const apiRes = await fetch(`${config.acestep.apiUrl}/v1/models`);
       if (apiRes.ok) {
         const data = await apiRes.json() as any;
-        const gradioModels = data?.data?.models || data?.models || [];
+        const gradioModels = Array.isArray(data?.data) ? data.data : data?.data?.models || data?.models || [];
         if (gradioModels.length > 0) {
-          activeModel = gradioModels[0]?.name || null;
+          activeModel = engineModelName(gradioModels.find((item: any) => item.is_default) || gradioModels[0]) || null;
         }
       }
     } catch {

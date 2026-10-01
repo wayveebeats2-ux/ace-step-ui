@@ -10,6 +10,15 @@ export function isTurboModel(model: string): boolean {
   return /turbo|dmd/i.test(model);
 }
 
+// OpenRouter's /v1/models uses provider-qualified IDs and human-readable names.
+// Both refer to the same internal DiT name accepted by /release_task.
+export function engineModelName(item: unknown): string | undefined {
+  const entry = item as { id?: string; name?: string } | undefined;
+  const value = typeof item === 'string' ? item : entry?.id || entry?.name;
+  if (typeof value !== 'string') return undefined;
+  return value.trim().replace(/^acestep\//i, '').replace(/^ACE-Step\s+/i, '');
+}
+
 function numberInRange(value: number | undefined, fallback: number, min: number, max: number): number {
   return Number.isFinite(value) ? Math.min(max, Math.max(min, value!)) : fallback;
 }

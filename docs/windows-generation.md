@@ -43,7 +43,7 @@ Obsolete health probes, generation Gradio fallbacks, and Python generation/forma
 
 - Frontend production build and repository TypeScript check passed.
 - Backend TypeScript build passed.
-- Thirteen backend tests passed, including an isolated backend process against a simulated API with upstream-shaped responses.
+- Fifteen backend tests passed, including an isolated backend process against a simulated API with upstream-shaped responses.
 - Integration tests cover PT payloads, durable library completion without status polling, WAV playback/range requests, one-copy downloads, immediate nested KV-cache failure, source/reference staging cleanup, and REST formatting errors.
 - The real upstream Pydantic schema accepted all 32 fields in the basic regression payload.
 
@@ -74,3 +74,5 @@ Inspect `logs/backend.log` for the submitted PT/0.6B profile, engine task ID, st
 ## Portable engine compatibility fix
 
 The uploaded Windows logs showed successful PT/0.6B initialization, followed by `/v1/init` HTTP 404 before any `/release_task` submission. The exact `/v1/models` response was not included in those logs. Compatibility tests now cover older/list-shaped and unknown inventories with `/v1/init` unavailable, clear errors for unsupported model switching, and advertised initialization on newer engines. This fixes the premature initialization failure; it does not establish real GPU/VAE generation success.
+
+The next uploaded logs identified the older OpenRouter inventory: `name` is a display label such as `ACE-Step acestep-v15-turbo`, while `id` is `acestep/acestep-v15-turbo`. Model matching now prefers the ID, removes the supported provider prefix, and normalizes display labels when no ID is present. The frontend model inventory uses the same normalization. Tests include the actual upstream OpenRouter-shaped response with both fields.

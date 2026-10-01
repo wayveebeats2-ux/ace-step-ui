@@ -13,7 +13,7 @@ let engineBase: string, lastPayload: any, activeModel = 'acestep-v15-turbo', hea
 let lastTask = '', taskCount = 0, queryCount = 0, downloadCount = 0, initCount = 0;
 const tasks = new Map<string, any>();
 let backendLog = '';
-let inventoryMode: 'modern' | 'legacy' | 'unknown' = 'modern';
+let inventoryMode: 'modern' | 'legacy' | 'unknown' | 'openrouter' = 'modern';
 // One second PCM silence: tests transport/decoding only, not model inference quality.
 const wave = Buffer.alloc(44 + 16000);
 wave.write('RIFF'); wave.writeUInt32LE(wave.length - 8, 4); wave.write('WAVEfmt ', 8);
@@ -49,6 +49,7 @@ before(async () => {
     response.setHeader('Content-Type', 'application/json');
     if (url.pathname === '/health') { response.end(JSON.stringify({ code: 200, data: { status: 'ok', models_initialized: healthReady } })); return; }
     if (url.pathname === '/v1/models') {
+      if (inventoryMode === 'openrouter') { response.end(JSON.stringify({ data: [{ id: `acestep/${activeModel}`, name: `ACE-Step ${activeModel}`, created: 0, input_modalities: ['text', 'audio'], output_modalities: ['audio', 'text'], context_length: 4096, max_output_length: 300, pricing: { prompt: '0', completion: '0', request: '0' }, description: 'AI music generation model' }] })); return; }
       const data = inventoryMode === 'legacy' ? [{ id: activeModel }] : inventoryMode === 'unknown' ? {} : { default_model: activeModel, models: [{ name: activeModel, is_default: true, is_loaded: true }] };
       response.end(JSON.stringify({ code: 200, data })); return;
     }
@@ -179,4 +180,18 @@ test('modern APIs still support switching the primary model when advertised', as
   const job = await api('/api/generate', { customMode: true, style: 'Modern switch', instrumental: true, ditModel: 'acestep-v15-base' });
   await waitFor(async () => (await api('/api/generate/history')).jobs.find((item: any) => item.id === job.jobId)?.status === 'succeeded', 'Modern model switching');
   assert.equal(initCount, beforeInit + 1); assert.equal(lastPayload.model, 'acestep-v15-base');
+});
+
+
+test('OpenRouter inventory uses canonical IDs and submits without init', async () => {
+  activeModel = 'acestep-v15-turbo'; inventoryMode = 'openrouter';
+  const beforeInit = initCount;
+  try {
+    const models = (await api('/api/generate/models')).models;
+    assert.equal(models.find((item: any) => item.name === activeModel)?.is_active, true);
+    const job = await api('/api/generate', { customMode: true, style: prompt, instrumental: true, duration: 30, thinking: false, enhance: false, ditModel: activeModel });
+    await waitFor(async () => (await api('/api/generate/history')).jobs.find((item: any) => item.id === job.jobId)?.status === 'succeeded', 'OpenRouter portable generation');
+    assert.equal(lastPayload.model, 'acestep-v15-turbo');
+    assert.equal(lastPayload.lm_backend, 'pt'); assert.equal(initCount, beforeInit);
+  } finally { inventoryMode = 'modern'; }
 });

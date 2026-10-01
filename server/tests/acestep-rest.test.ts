@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { audioExtension, buildReleaseTaskPayload, engineAudioUrl, parseTaskResult } from '../src/services/acestep-rest.js';
+import { audioExtension, buildReleaseTaskPayload, engineAudioUrl, engineModelName, parseTaskResult } from '../src/services/acestep-rest.js';
 import type { GenerationParams } from '../src/services/acestep-types.js';
 
 export const regressionPrompt = 'Atmospheric late-night electronic instrumental, deep warm bass, crisp punchy drums, dreamy synth pads, subtle melodic arpeggios, modern polished production, cinematic and slightly dark, smooth progression with a strong groove.';
@@ -68,4 +68,12 @@ test('encoded /v1/audio paths preserve WAV/FLAC extensions and reject foreign UR
   assert.equal(audioExtension(engineAudioUrl('/v1/audio?path=%2Ftmp%2Fa.flac')), '.flac');
   assert.throws(() => engineAudioUrl('https://example.com/v1/audio?path=test.mp3'), /unexpected audio URL/);
   assert.throws(() => engineAudioUrl('/etc/passwd'), /unexpected audio URL/);
+});
+
+
+test('OpenRouter model IDs take precedence over display names', () => {
+  assert.equal(engineModelName({ id: 'acestep/acestep-v15-turbo', name: 'ACE-Step acestep-v15-turbo' }), 'acestep-v15-turbo');
+  assert.equal(engineModelName({ name: 'ACE-Step acestep-v15-turbo' }), 'acestep-v15-turbo');
+  assert.equal(engineModelName({ name: 'acestep-v15-base' }), 'acestep-v15-base');
+  assert.equal(engineModelName(undefined), undefined);
 });

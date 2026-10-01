@@ -6,7 +6,7 @@ import { config } from '../config/index.js';
 import type { GenerationParams, GenerationResult, JobStatus } from './acestep-types.js';
 import {
   audioExtension, buildReleaseTaskPayload, DEFAULT_DIT_MODEL, DESKTOP_LM_MODEL,
-  engineAudioUrl, GENERATION_TIMEOUT_MS, parseTaskResult, requestEngineJson,
+  engineAudioUrl, engineModelName, GENERATION_TIMEOUT_MS, parseTaskResult, requestEngineJson,
 } from './acestep-rest.js';
 
 export type { GenerationParams, GenerationResult, JobStatus } from './acestep-types.js';
@@ -50,8 +50,8 @@ async function ensureModelLoaded(model: string): Promise<void> {
   const inventory = response.data ?? response;
   const models = Array.isArray(inventory) ? inventory : inventory.models;
   const entries = Array.isArray(models) ? models : [];
-  const nameOf = (item: any): string | undefined => typeof item === 'string' ? item : item?.name || item?.id;
-  const current = inventory.default_model || nameOf(entries.find((item: any) => item.is_default));
+  const nameOf = engineModelName;
+  const current = nameOf(inventory.default_model) || nameOf(entries.find((item: any) => item.is_default));
   // Older portable APIs list only initialized models and have no /v1/init.
   // A non-default loaded slot can also be selected directly by /release_task.
   if (entries.some((item: any) => nameOf(item) === model && item?.is_loaded !== false)) return;
