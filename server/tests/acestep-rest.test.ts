@@ -21,7 +21,7 @@ test('30 second instrumental regression pins PT/0.6B on every request, including
   assert.equal(payload.thinking, false);
   assert.equal(payload.use_format, false);
   assert.equal(payload.use_tiled_decode, true);
-  assert.equal(payload.use_cot_caption, true);
+  assert.equal(payload.use_cot_caption, false);
   assert.equal(payload.use_cot_language, true);
   assert.equal('bpm' in payload, false);
   assert.equal('key_scale' in payload, false);
@@ -76,4 +76,19 @@ test('OpenRouter model IDs take precedence over display names', () => {
   assert.equal(engineModelName({ name: 'ACE-Step acestep-v15-turbo' }), 'acestep-v15-turbo');
   assert.equal(engineModelName({ name: 'acestep-v15-base' }), 'acestep-v15-base');
   assert.equal(engineModelName(undefined), undefined);
+});
+
+test('Enhance OFF preserves 90s hip hop while allowing automatic metadata and independent Thinking', () => {
+  for (const thinking of [false, true]) {
+    const payload = buildReleaseTaskPayload({ ...params, style: '90s hip hop', thinking, enhance: false, useCotCaption: true });
+    assert.equal(payload.prompt, '90s hip hop');
+    assert.equal(payload.audio_duration, 30);
+    assert.equal(payload.thinking, thinking);
+    assert.equal(payload.use_format, false);
+    assert.equal(payload.use_cot_caption, false);
+    assert.equal(payload.use_cot_language, true);
+    assert.equal('bpm' in payload, false);
+  }
+  assert.equal(buildReleaseTaskPayload({ ...params, enhance: true }).use_cot_caption, true);
+  assert.equal(buildReleaseTaskPayload({ ...params, enhance: true, useCotCaption: false }).use_cot_caption, false);
 });

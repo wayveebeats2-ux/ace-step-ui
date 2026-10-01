@@ -58,8 +58,9 @@ export function buildReleaseTaskPayload(params: GenerationParams): Record<string
     lm_top_k: params.lmTopK ?? 0,
     lm_top_p: params.lmTopP ?? 0.9,
     lm_negative_prompt: params.lmNegativePrompt || 'NO USER INPUT',
-    // These flags also permit metadata completion when thinking is off.
-    use_cot_caption: params.useCotCaption ?? true,
+    // Automatic metadata must not replace the user's style when Enhance is off.
+    // Thinking controls audio codes, independently of caption rewriting.
+    use_cot_caption: Boolean(params.enhance) && (params.useCotCaption ?? true),
     use_cot_language: params.useCotLanguage ?? true,
     constrained_decoding_debug: params.constrainedDecodingDebug ?? false,
   };

@@ -107,6 +107,7 @@ test('full 30s request completes into the library without status polling, plays 
   assert.equal(lastPayload.lm_backend, 'pt'); assert.equal(lastPayload.lm_model_path, 'acestep-5Hz-lm-0.6B');
   assert.equal(lastPayload.allow_lm_batch, false); assert.equal(lastPayload.inference_steps, 8);
   assert.equal(lastPayload.thinking, false); assert.equal(lastPayload.use_format, false);
+  assert.equal(lastPayload.use_cot_caption, false);
   const first = await api(`/api/generate/status/${job.jobId}`), second = await api(`/api/generate/status/${job.jobId}`);
   assert.equal(first.status, 'succeeded'); assert.deepEqual(first.result, second.result);
   const songs = (await api('/api/songs')).songs; assert.equal(songs.length, 1);
@@ -138,6 +139,7 @@ test('cover/reference paths are staged in system temp and cleaned after completi
   const job = await api('/api/generate', { customMode: true, style: 'Cover regression', lyrics: '', instrumental: true, taskType: 'cover', sourceAudioUrl: source, referenceAudioUrl: source, enhance: true });
   await waitFor(async () => (await api('/api/generate/history')).jobs.find((item: any) => item.id === job.jobId)?.status === 'succeeded', 'Cover staging');
   assert.equal(lastPayload.use_format, true);
+  assert.equal(lastPayload.use_cot_caption, true);
   assert.ok(lastPayload.src_audio_path.startsWith(os.tmpdir()));
   await assert.rejects(readFile(lastPayload.src_audio_path), /ENOENT/);
   await assert.rejects(readFile(lastPayload.reference_audio_path), /ENOENT/);
