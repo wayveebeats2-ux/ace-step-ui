@@ -13,6 +13,7 @@ let engineBase: string, lastPayload: any, activeModel = 'acestep-v15-turbo', hea
 let lastTask = '', taskCount = 0, queryCount = 0, downloadCount = 0, initCount = 0;
 const tasks = new Map<string, any>();
 let backendLog = '';
+let inventoryMode: 'modern' | 'legacy' | 'unknown' = 'modern';
 // One second PCM silence: tests transport/decoding only, not model inference quality.
 const wave = Buffer.alloc(44 + 16000);
 wave.write('RIFF'); wave.writeUInt32LE(wave.length - 8, 4); wave.write('WAVEfmt ', 8);
@@ -47,8 +48,16 @@ before(async () => {
     const url = new URL(request.url!, 'http://127.0.0.1');
     response.setHeader('Content-Type', 'application/json');
     if (url.pathname === '/health') { response.end(JSON.stringify({ code: 200, data: { status: 'ok', models_initialized: healthReady } })); return; }
-    if (url.pathname === '/v1/models') { response.end(JSON.stringify({ code: 200, data: { default_model: activeModel, models: [{ name: activeModel, is_default: true }] } })); return; }
-    if (url.pathname === '/v1/init') { activeModel = body.model; initCount++; response.end(JSON.stringify({ code: 200, data: { loaded_model: activeModel } })); return; }
+    if (url.pathname === '/v1/models') {
+      const data = inventoryMode === 'legacy' ? [{ id: activeModel }] : inventoryMode === 'unknown' ? {} : { default_model: activeModel, models: [{ name: activeModel, is_default: true, is_loaded: true }] };
+      response.end(JSON.stringify({ code: 200, data })); return;
+    }
+    if (url.pathname === '/openapi.json') { response.end(JSON.stringify({ paths: inventoryMode === 'modern' ? { '/v1/init': { post: {} } } : {} })); return; }
+    if (url.pathname === '/v1/init') {
+      initCount++;
+      if (inventoryMode !== 'modern') { response.statusCode = 404; response.end(JSON.stringify({ detail: 'Not Found' })); return; }
+      activeModel = body.model; response.end(JSON.stringify({ code: 200, data: { loaded_model: activeModel } })); return;
+    }
     if (url.pathname === '/release_task') {
       lastPayload = body; lastTask = `task-${++taskCount}`; tasks.set(lastTask, body);
       response.end(JSON.stringify({ code: 200, data: { task_id: lastTask } })); return;
@@ -137,4 +146,37 @@ test('format failures return useful REST errors without starting a second Python
   const response = await fetch(base + '/api/generate/format', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ caption: 'Format test' }) });
   assert.equal(response.status, 500); assert.match((await response.json() as any).error, /Engine temporarily unavailable/);
   assert.doesNotMatch(backendLog, /Fallback spawn|falling back to Python/);
+});
+
+test('portable APIs without /v1/init generate using legacy or unknown inventories', async () => {
+  const beforeInit = initCount;
+  try {
+    for (const mode of ['legacy', 'unknown'] as const) {
+      inventoryMode = mode;
+      const job = await api('/api/generate', { customMode: true, style: `Portable ${mode}`, instrumental: true, ditModel: activeModel });
+      await waitFor(async () => (await api('/api/generate/history')).jobs.find((item: any) => item.id === job.jobId)?.status === 'succeeded', `${mode} portable API completion`);
+      assert.equal(lastPayload.model, activeModel);
+      assert.equal(lastPayload.lm_backend, 'pt');
+    }
+    assert.equal(initCount, beforeInit);
+  } finally { inventoryMode = 'modern'; }
+});
+
+test('unsupported portable model switching fails clearly without calling /v1/init', async () => {
+  const beforeInit = initCount, beforeTask = taskCount;
+  inventoryMode = 'legacy';
+  try {
+    const job = await api('/api/generate', { customMode: true, style: 'Switch model', instrumental: true, ditModel: 'acestep-v15-base' });
+    await waitFor(async () => (await api('/api/generate/history')).jobs.find((item: any) => item.id === job.jobId)?.status === 'failed', 'Unsupported switching error');
+    const status = await api(`/api/generate/status/${job.jobId}`);
+    assert.match(status.error, /cannot load acestep-v15-base on demand/);
+    assert.equal(initCount, beforeInit); assert.equal(taskCount, beforeTask);
+  } finally { inventoryMode = 'modern'; }
+});
+
+test('modern APIs still support switching the primary model when advertised', async () => {
+  const beforeInit = initCount;
+  const job = await api('/api/generate', { customMode: true, style: 'Modern switch', instrumental: true, ditModel: 'acestep-v15-base' });
+  await waitFor(async () => (await api('/api/generate/history')).jobs.find((item: any) => item.id === job.jobId)?.status === 'succeeded', 'Modern model switching');
+  assert.equal(initCount, beforeInit + 1); assert.equal(lastPayload.model, 'acestep-v15-base');
 });

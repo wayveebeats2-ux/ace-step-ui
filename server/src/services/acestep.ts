@@ -48,8 +48,24 @@ export async function discoverEndpoints(): Promise<unknown> {
 async function ensureModelLoaded(model: string): Promise<void> {
   const response = await requestEngineJson('/v1/models');
   const inventory = response.data ?? response;
-  const current = inventory.default_model || inventory.models?.find((item: any) => item.is_default)?.name;
-  if (current === model) return;
+  const models = Array.isArray(inventory) ? inventory : inventory.models;
+  const entries = Array.isArray(models) ? models : [];
+  const nameOf = (item: any): string | undefined => typeof item === 'string' ? item : item?.name || item?.id;
+  const current = inventory.default_model || nameOf(entries.find((item: any) => item.is_default));
+  // Older portable APIs list only initialized models and have no /v1/init.
+  // A non-default loaded slot can also be selected directly by /release_task.
+  if (entries.some((item: any) => nameOf(item) === model && item?.is_loaded !== false)) return;
+  if (current === model && !entries.some((item: any) => nameOf(item) === model && item?.is_loaded === false)) return;
+  if (!current && !entries.length) {
+    // Unknown inventory must not turn an otherwise valid generation into an
+    // unsupported model-init request. Let /release_task validate its selection.
+    console.warn(`[Model] Inventory did not identify loaded models; submitting ${model} directly to /release_task`);
+    return;
+  }
+  const schema = await requestEngineJson('/openapi.json');
+  if (!schema.paths?.['/v1/init']?.post) {
+    throw new Error(`This ACE-Step engine cannot load ${model} on demand. Select an already-loaded model (${entries.map(nameOf).filter(Boolean).join(', ') || current || 'unknown'}) or update the official engine.`);
+  }
   // Switch the primary slot, rather than preloading multiple DiTs on an 8 GB GPU.
   console.log(`[Model] Switching primary DiT ${current || 'unknown'} -> ${model}`);
   await requestEngineJson('/v1/init', { model, init_llm: false }, 15 * 60_000);

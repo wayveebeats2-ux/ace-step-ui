@@ -31,7 +31,7 @@ Tier3 recommends quantization, but the audited REST startup does not pass a quan
 
 ## REST lifecycle and behavior
 
-Normal generation uses `/release_task`, `/query_result`, and same-origin `/v1/audio` downloads. Health uses `/health`. Model selection uses `/v1/models` and switches the primary slot with `/v1/init` when required, without preloading extra DiTs. Turbo/DMD requests are capped at eight steps, including custom timestep overrides; turbo guidance is fixed at one. The desktop UI defaults to eight steps and caps batches at two.
+Normal generation uses `/release_task`, `/query_result`, and same-origin `/v1/audio` downloads. Health uses `/health`. Model selection uses `/v1/models` and submits directly for an already-loaded model. Primary-slot switching uses `/v1/init` only when advertised by the engine OpenAPI schema. Older portable engines do not provide that endpoint; unknown inventory responses are passed to `/release_task` for validation rather than forcing initialization. Turbo/DMD requests are capped at eight steps, including custom timestep overrides; turbo guidance is fixed at one. The desktop UI defaults to eight steps and caps batches at two.
 
 Thinking OFF disables LM audio-code generation; upstream may still use the LM to fill missing automatic metadata. Enhance is forwarded as `use_format`. Automatic duration is left to ACE-Step rather than silently forced to 60 seconds. Random/fixed seeds, CoT flags, track fields, and source/reference paths use the current API field names. Uploaded source/reference audio is staged under the OS temporary directory because current ACE-Step rejects arbitrary absolute input paths.
 
@@ -43,7 +43,7 @@ Obsolete health probes, generation Gradio fallbacks, and Python generation/forma
 
 - Frontend production build and repository TypeScript check passed.
 - Backend TypeScript build passed.
-- Ten backend tests passed, including an isolated backend process against a simulated API with upstream-shaped responses.
+- Thirteen backend tests passed, including an isolated backend process against a simulated API with upstream-shaped responses.
 - Integration tests cover PT payloads, durable library completion without status polling, WAV playback/range requests, one-copy downloads, immediate nested KV-cache failure, source/reference staging cleanup, and REST formatting errors.
 - The real upstream Pydantic schema accepted all 32 fields in the basic regression payload.
 
@@ -70,3 +70,7 @@ Inspect `logs/backend.log` for the submitted PT/0.6B profile, engine task ID, st
 3. Address existing local-file deletion/path validation and library privacy defaults, especially before enabling network access beyond localhost.
 4. Package frontend styling/assets locally for reliable offline use; audit dependency advisories and native backend dependencies in the Windows ZIP.
 5. Add engine cancellation and recovery/reconciliation for backend restarts or inference timeouts.
+
+## Portable engine compatibility fix
+
+The uploaded Windows logs showed successful PT/0.6B initialization, followed by `/v1/init` HTTP 404 before any `/release_task` submission. The exact `/v1/models` response was not included in those logs. Compatibility tests now cover older/list-shaped and unknown inventories with `/v1/init` unavailable, clear errors for unsupported model switching, and advertised initialization on newer engines. This fixes the premature initialization failure; it does not establish real GPU/VAE generation success.
